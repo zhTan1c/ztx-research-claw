@@ -1,0 +1,314 @@
+# ============================================================
+# ztx-research-claw / config.yaml
+# 柔性物质灵巧抓取 (Deformable/Dexterous Grasping) 综述 Agent
+# ============================================================
+
+project:
+  name: "ztx-research-claw"
+  topic: "柔性物质灵巧抓取"
+  topic_en: "Deformable Object Dexterous Grasping"
+  dotenv_path: ".env"
+  keywords:
+    - "deformable object manipulation"
+    - "dexterous grasping soft objects"
+    - "compliant grasping"
+    - "whole-hand grasping"
+    - "tactile sensing grasping"
+    - "sim-to-real deformable grasping"
+    - "soft tissue robotic grasping"
+    - "cloth manipulation robotic"
+  output_dir: "./outputs"
+  draft_dir: "./outputs/drafts"
+  pdf_dir: "./outputs/papers"
+  bib_file: "./outputs/references.bib"
+
+# ------------------------------------------------------------
+# 1. LLM 模型配置 & 任务路由（7 个 agent）
+# ------------------------------------------------------------
+llm:
+  # MiMo V2.5 Pro — 负责：检索、下载、阅读、框架解析
+  mimo_v25_pro:
+    provider: "mimo"
+    base_url: "https://token-plan-cn.xiaomimimo.com/v1"
+    api_key: "${MIMO_API_KEY}"
+    model: "mimo-v2.5-pro"
+    max_tokens: 131072
+    temperature: 0.3
+    top_p: 0.9
+    context_window: 1048576
+    assigned_agents:
+      - "outline_parser"
+      - "literature_searcher"
+      - "pdf_downloader"
+      - "paper_reader"
+    reading_strategy:
+      max_papers_per_batch: 5
+      fulltext_chunk_size: 8000
+      overlap_tokens: 500
+
+  # DeepSeek V4 Pro — 负责：写作、方法演进分析、引用格式化
+  deepseek_v4_pro:
+    provider: "deepseek"
+    base_url: "https://api.deepseek.com"
+    api_key: "${DEEPSEEK_API_KEY}"
+    model: "deepseek-v4-pro"
+    max_tokens: 8192
+    temperature: 0.6
+    top_p: 0.9
+    context_window: 1048576
+    reasoning_effort: "high"
+    response_format: "text"
+    assigned_agents:
+      - "writer"
+      - "methodology_analyst"
+      - "citation_formatter"
+    writing:
+      reasoning_effort_draft: "high"
+      reasoning_effort_final: "max"
+      json_mode_for_tables: true
+
+  fallback:
+    enabled: true
+    fallback_order: ["deepseek_v4_pro", "mimo_v25_pro"]
+
+# ------------------------------------------------------------
+# 2. 论文检索 API 配置
+# ------------------------------------------------------------
+search:
+  semantic_scholar:
+    enabled: true
+    base_url: "https://api.semanticscholar.org/graph/v1"
+    api_key: null
+    user_agent_email: "2927921700@qq.com"
+    rate_limit: 100
+    fields: "paperId,title,abstract,year,citationCount,referenceCount,authors,venue,openAccessPdf,tldr,influentialCitationCount"
+    query: "{keyword}"
+    fields_of_study:
+      - "Robotics"
+      - "Computer Vision"
+      - "Engineering"
+    max_results_per_query: 100
+    citation_scoring:
+      base_threshold: 5
+      recent_years: 3
+      recent_threshold: 2
+      use_influential_citations: true
+      recency_bonus: 0.15
+    citation_expansion:
+      enabled: true
+      depth: 1
+
+  openalex:
+    enabled: true
+    base_url: "https://api.openalex.org"
+    rate_limit: 10
+    filter_topics:
+      - "Robotics"
+      - "Computer Vision"
+      - "Mechanical Engineering"
+      - "Artificial Intelligence"
+    max_results_per_query: 100
+    mailto: "2927921700@qq.com"
+
+  arxiv:
+    enabled: true
+    base_url: "http://export.arxiv.org/api/query"
+    api_key: null
+    rate_limit: 3
+    categories:
+      - "cs.RO"
+      - "cs.CV"
+      - "cs.LG"
+      - "cs.SY"
+    sort_by: "submittedDate"
+    sort_order: "descending"
+    max_results_per_query: 100
+
+  crossref:
+    enabled: true
+    base_url: "https://api.crossref.org/works"
+    api_key: null
+    rate_limit: 50
+    mailto: "2927921700@qq.com"
+
+  dblp:
+    enabled: true
+    base_url: "https://dblp.org/search/publ/api"
+    api_key: null
+    format: "json"
+    max_results: 100
+
+  unpaywall:
+    enabled: true
+    base_url: "https://api.unpaywall.org/v2"
+    email: "2927921700@qq.com"
+
+# ------------------------------------------------------------
+# 3. 网络代理配置
+# ------------------------------------------------------------
+network:
+  use_explicit_proxy: false
+  proxy:
+    http: "http://127.0.0.1:7890"
+    https: "http://127.0.0.1:7890"
+  timeout: 30
+  retries: 3
+  retry_backoff: 2.0
+  verify_ssl: true
+  headers:
+    User-Agent: "ztx-research-claw/1.0 (2927921700@qq.com)"
+
+# ------------------------------------------------------------
+# 4. Agent 行为参数（7 个 agent，按协作流程编排）
+# ------------------------------------------------------------
+agents:
+  # --- MiMo 系（4 个）---
+
+  outline_parser:
+    model: "mimo_v25_pro"
+    input_file: "./data/outline.md"
+    structure_validation: true
+    output: "parsed_outline"          # 输出给 writer 作为章节骨架
+
+  literature_searcher:
+    model: "mimo_v25_pro"
+    search_pipeline: ["semantic_scholar", "openalex", "arxiv"]
+    deduplication: true
+    dedup_threshold: 0.85
+    max_total_papers: 200
+    relevance_scoring:
+      citation_weight: 0.3
+      recency_weight: 0.2
+      abstract_match_weight: 0.5
+
+  pdf_downloader:
+    model: "mimo_v25_pro"
+    sources_priority:
+      - "open_access_pdf"
+      - "arxiv_pdf"
+      - "unpaywall"
+      - "dblp_bib"
+    download_timeout: 60
+    max_concurrent: 5
+    # 下载时同步记录引用元数据，输出给 citation_formatter
+    extract_citation_on_download: true
+    citation_output_field: "preliminary_bib"
+
+  paper_reader:
+    model: "mimo_v25_pro"
+    reading_modes:
+      abstract_only:
+        max_tokens: 4000
+        model_override: null
+      fulltext_deep:
+        max_tokens: 120000
+        extract_sections: ["introduction", "related_work", "methodology", "experiments", "conclusion"]
+      cross_paper_compare:
+        max_tokens: 200000
+        model_override: null
+
+  # --- DeepSeek 系（3 个）---
+
+  methodology_analyst:
+    model: "deepseek_v4_pro"
+    reasoning_effort: "high"
+    # 基于 paper_reader 的输出，分析方法演进
+    analysis_scope:
+      - "method_comparison"
+      - "evolution_tracking"
+      - "taxonomy_generation"
+    # 输出：方法演进图谱 + 各方法分类标签，供 writer 和 citation_formatter 使用
+    output_to:
+      - "writer"
+      - "citation_formatter"
+
+  citation_formatter:
+    model: "deepseek_v4_pro"
+    reasoning_effort: "high"
+    # 接收 pdf_downloader 的 preliminary_bib + 各章节草稿中的占位引用
+    # 输出：统一格式的 references.bib + 带 \cite{} 的章节文本
+    bib_format: "bibtex"
+    citation_style: "ieee"            # 或 "acm", "apa"，按需调整
+    validation_rules:
+      check_doi: true
+      check_url: true
+      check_venue: true
+    # 插入模式：在 writer 生成初稿后，由 citation_formatter 二次处理
+    insertion_mode: "post_write"      # writer 先写 → citation_formatter 后插
+
+  writer:
+    model: "deepseek_v4_pro"
+    # 7 个章节 + 大纲对齐 + 终稿润色
+    pipeline:
+      - "outline_alignment"          # 对照 outline_parser 的输出对齐结构
+      - "introduction"
+      - "non_rl_method"
+      - "deep_rl_method"
+      - "mixed_and_SOTA_method"
+      - "experiment_and_performance"
+      - "challenges_and_trends"
+      - "conclusion"
+      - "polish"
+    reasoning_effort_map:
+      outline_alignment: "high"
+      introduction: "high"
+      non_rl_method: "high"
+      deep_rl_method: "high"
+      mixed_and_SOTA_method: "high"
+      experiment_and_performance: "high"
+      challenges_and_trends: "high"
+      conclusion: "high"
+      polish: "max"
+    output_formats:
+      default: "markdown"
+      tables: "json"
+      citations: "bibtex"
+    # 写作时接收的输入源
+    inputs:
+      - "outline_parser"             # 章节骨架
+      - "paper_reader"               # 论文阅读笔记
+      - "methodology_analyst"        # 方法演进分析
+      # citation_formatter 在 writer 之后运行，不直接参与初稿生成
+
+# ------------------------------------------------------------
+# 5. 断点续跑配置（7 个 agent）
+# ------------------------------------------------------------
+checkpoint:
+  enabled: true
+  dir: "./outputs/checkpoints"
+  agents:
+    - name: "outline_parser"
+      file: "outline_parser.json"
+    - name: "literature_searcher"
+      file: "literature_searcher.json"
+    - name: "pdf_downloader"
+      file: "pdf_downloader.json"
+    - name: "paper_reader"
+      file: "paper_reader.json"
+    - name: "methodology_analyst"
+      file: "methodology_analyst.json"
+    - name: "citation_formatter"
+      file: "citation_formatter.json"
+    - name: "writer"
+      file: "writer.json"
+
+# ------------------------------------------------------------
+# 6. 提示词配置（7 个章节 + system_prompt）
+# ------------------------------------------------------------
+prompts:
+  system_prompt: "./prompts/system_prompt.txt"
+  introduction: "./prompts/introduction.txt"
+  non_rl_method: "./prompts/non_rl_method.txt"
+  deep_rl_method: "./prompts/deep_rl_method.txt"
+  mixed_and_SOTA_method: "./prompts/mixed_and_SOTA_method.txt"
+  experiment_and_performance: "./prompts/experiment_and_performance.txt"
+  challenges_and_trends: "./prompts/challenges_and_trends.txt"
+  conclusion: "./prompts/conclusion.txt"
+
+# ------------------------------------------------------------
+# 7. 日志与调试
+# ------------------------------------------------------------
+logging:
+  level: "INFO"
+  file: "./outputs/agent.log"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
