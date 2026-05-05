@@ -87,3 +87,78 @@
 ```bash
 pip install openai pyyaml pdfplumber httpx aiohttp aiofiles tenacity python-dotenv
 ```
+
+
+## 2026-05-05 — 代码审查与问题修复
+
+### 完成内容
+
+对项目进行全面审查，修复代理支持、checkpoint 解析、搜索相关性等多个问题。
+
+### 详细过程
+
+#### 1. 代理支持修复（6 个文件，8 处改动）
+
+**问题：** httpx 和 OpenAI SDK 默认不读取系统代理环境变量，导致在国内网络环境下无法访问学术 API。
+
+**修改内容：**
+- `agents/literature_searcher.py`：3 处 httpx.AsyncClient 添加 `trust_env=True`
+- `agents/pdf_downloader.py`：2 处 httpx.AsyncClient 添加 `trust_env=True`
+- `agents/paper_reader.py`：添加 httpx 导入，创建带 `trust_env=True` 的 http_client 传给 OpenAI
+- `agents/methodology_analyst.py`：同上
+- `agents/writer.py`：同上
+- `agents/citation_formatter.py`：同上
+
+#### 2. Checkpoint 空文件解析修复
+
+**问题：** `outputs/checkpoints/` 下的空 JSON 文件导致 `json.loads("")` 报错。
+
+**修改内容：**
+- `models.py` 第 252-258 行：`AgentCheckpoint.load()` 方法添加空文件检查，空文件返回默认实例。
+
+#### 3. SOCKS5 代理依赖
+
+**问题：** 系统环境变量包含 `ALL_PROXY=socks5://...`，httpx 需要 `socksio` 包。
+
+**解决方案：** `pip install httpx[socks]` 或 `pip install socksio`
+
+#### 4. arXiv API URL 修复
+
+**问题：** config.yaml 中 arXiv 使用 `http://` 导致 301 重定向。
+
+**修改内容：** `config.yaml` 中 `http://export.arxiv.org` → `https://export.arxiv.org`
+
+#### 5. OpenAlex filter_topics 修复
+
+**问题：** filter_topics 使用概念名称而非概念 ID，导致 400 Bad Request。
+
+**修改内容：** 清空 filter_topics 列表，避免无效过滤。
+
+#### 6. 搜索相关性修复
+
+**问题：** 用中文章节标题搜索英文论文库，返回大量不相关论文（如英语教学、基因表达等）。
+
+**修改内容：**
+- `config.yaml`：更新 keywords 为更精确的英文关键词
+- `agents/literature_searcher.py`：
+  - 重写 `_generate_queries()` 方法，强制使用英文主题关键词
+  - 新增 `_is_english_query()` 方法检测查询语言
+  - 新增 `_filter_by_relevance()` 方法过滤不相关论文
+  - 在 `run()` 方法中调用相关性过滤
+
+#### 7. .gitignore 更新
+
+**新增忽略项：**
+- `outputs/papers/` — 下载的论文 PDF
+- `outputs/drafts/` — 生成的草稿
+- `outputs/checkpoints/` — checkpoint 文件
+- `outputs/references.bib` — 生成的参考文献
+- `.conda/` / `miniconda3/` — conda 环境
+
+### 依赖安装
+
+```bash
+pip install httpx[socks]  # 新增：SOCKS5 代理支持
+```
+
+---

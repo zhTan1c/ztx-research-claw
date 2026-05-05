@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import pdfplumber
 from openai import OpenAI
 
@@ -141,8 +142,9 @@ class PaperReader:
         self.ckpt_dir = Path(ckpt_cfg.get("dir", "./outputs/checkpoints"))
         self.ckpt_file = self.ckpt_dir / "paper_reader.json"
 
-        # Create OpenAI client
-        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        # Create OpenAI client with proxy support
+        http_client = httpx.Client(trust_env=True)
+        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key, http_client=http_client)
 
         logger.info(
             "PaperReader initialized — model=%s, chunk_size=%d, modes=%s",

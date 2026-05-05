@@ -64,6 +64,7 @@ class PDFDownloader:
             proxy=proxy,
             headers=self.network_cfg.get("headers", {}),
             verify=self.network_cfg.get("verify_ssl", True),
+            trust_env=True,
         ) as client:
             tasks = []
             for paper in papers:
@@ -211,6 +212,7 @@ class PDFDownloader:
                 proxy=proxy,
                 headers=self.network_cfg.get("headers", {}),
                 verify=self.network_cfg.get("verify_ssl", True),
+                trust_env=True,
             ) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:

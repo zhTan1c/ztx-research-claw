@@ -9,14 +9,18 @@ project:
   topic_en: "Deformable Object Dexterous Grasping"
   dotenv_path: ".env"
   keywords:
-    - "deformable object manipulation"
-    - "dexterous grasping soft objects"
+    - "deformable object grasping"
+    - "dexterous manipulation"
+    - "soft object grasping"
     - "compliant grasping"
-    - "whole-hand grasping"
-    - "tactile sensing grasping"
-    - "sim-to-real deformable grasping"
-    - "soft tissue robotic grasping"
-    - "cloth manipulation robotic"
+    - "cloth manipulation"
+    - "tactile grasping"
+    - "sim-to-real grasping"
+    - "robotic grasping deformable"
+    - "soft tissue manipulation"
+    - "dexterous robotic hand"
+    - "grasping policy learning"
+    - "manipulation reinforcement learning"
   output_dir: "./outputs"
   draft_dir: "./outputs/drafts"
   pdf_dir: "./outputs/papers"
@@ -87,7 +91,7 @@ search:
       - "Robotics"
       - "Computer Vision"
       - "Engineering"
-    max_results_per_query: 100
+    max_results_per_query: 10
     citation_scoring:
       base_threshold: 5
       recent_years: 3
@@ -102,17 +106,13 @@ search:
     enabled: true
     base_url: "https://api.openalex.org"
     rate_limit: 10
-    filter_topics:
-      - "Robotics"
-      - "Computer Vision"
-      - "Mechanical Engineering"
-      - "Artificial Intelligence"
+    filter_topics: []
     max_results_per_query: 100
     mailto: "2927921700@qq.com"
 
   arxiv:
     enabled: true
-    base_url: "http://export.arxiv.org/api/query"
+    base_url: "https://export.arxiv.org/api/query"
     api_key: null
     rate_limit: 3
     categories:
@@ -122,7 +122,7 @@ search:
       - "cs.SY"
     sort_by: "submittedDate"
     sort_order: "descending"
-    max_results_per_query: 100
+    max_results_per_query: 10
 
   crossref:
     enabled: true
@@ -136,7 +136,7 @@ search:
     base_url: "https://dblp.org/search/publ/api"
     api_key: null
     format: "json"
-    max_results: 100
+    max_results: 10
 
   unpaywall:
     enabled: true
@@ -175,7 +175,7 @@ agents:
     search_pipeline: ["semantic_scholar", "openalex", "arxiv"]
     deduplication: true
     dedup_threshold: 0.85
-    max_total_papers: 200
+    max_total_papers: 20
     relevance_scoring:
       citation_weight: 0.3
       recency_weight: 0.2

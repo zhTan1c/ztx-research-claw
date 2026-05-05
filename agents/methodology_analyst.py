@@ -12,6 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError
 
 from models import (
@@ -40,9 +41,11 @@ class MethodologyAnalyst:
 
         # LLM config for DeepSeek V4 Pro
         ds_cfg: dict = config.get("llm", {}).get("deepseek_v4_pro", {})
+        http_client = httpx.Client(trust_env=True)
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
             api_key=ds_cfg.get("api_key", ""),
+            http_client=http_client,
         )
         self.model: str = ds_cfg.get("model", "deepseek-v4-pro")
         self.max_tokens: int = ds_cfg.get("max_tokens", 8192)

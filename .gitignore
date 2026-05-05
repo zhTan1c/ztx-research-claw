@@ -26,6 +26,10 @@ ENV/
 env/
 .venv/
 
+# conda 环境
+.conda/
+miniconda3/
+
 # 环境变量和密钥（绝对不能上传！）
 .env
 .env.local
@@ -46,6 +50,7 @@ Thumbs.db
 
 # 日志和临时文件
 *.log
+*.pkl
 logs/
 tmp/
 temp/
@@ -55,3 +60,15 @@ temp/
 *.db
 *.sqlite
 *.sqlite3
+
+# 项目特定：下载的论文
+outputs/papers/
+
+# 项目特定：生成的草稿和最终文档
+outputs/drafts/
+
+# 项目特定：checkpoint 文件
+outputs/checkpoints/
+
+# 项目特定：生成的参考文献
+outputs/references.bib

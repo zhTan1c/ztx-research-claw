@@ -123,8 +123,12 @@ class LiteratureSearcher:
         deduped = self._deduplicate(all_papers, self.dedup_threshold)
         logger.info("After deduplication: %d papers (from %d)", len(deduped), len(all_papers))
 
+        # Filter by relevance to topic first
+        relevant = self._filter_by_relevance(deduped)
+        logger.info("After relevance filtering: %d papers", len(relevant))
+
         # Filter by citation thresholds
-        filtered = self._apply_citation_filter(deduped)
+        filtered = self._apply_citation_filter(relevant)
         logger.info("After citation filtering: %d papers", len(filtered))
 
         # Score and rank
@@ -176,30 +180,60 @@ class LiteratureSearcher:
     # Query generation
     # ------------------------------------------------------------------
 
+    def _is_english_query(self, query: str) -> bool:
+        """Check if query is primarily in English."""
+        ascii_chars = sum(1 for c in query if ord(c) < 128)
+        return ascii_chars / len(query) > 0.5 if query else False
+
     def _generate_queries(self, chapter: Chapter) -> list[str]:
-        """Generate 2-3 search queries from chapter title, section titles, and project keywords."""
+        """Generate search queries for academic paper databases.
+        
+        Since we're searching English databases (Semantic Scholar, OpenAlex, arXiv),
+        we must use English keywords. Each query MUST include topic-specific terms
+        to ensure relevance.
+        """
         queries: list[str] = []
-
-        # Chapter title as primary query
-        title = chapter.title.strip()
-        if title:
-            queries.append(title)
-
-        # Combine top section titles
-        section_titles = [s.title for s in chapter.sections[:3] if s.title]
-        if section_titles:
-            combined = " ".join(section_titles)
-            queries.append(combined)
-
-        # Combine chapter title with project keywords for a broader query
-        keywords = self.config.get("project", {}).get("keywords", [])
-        if keywords and title:
-            # Pick first 2 keywords that aren't already in the title
-            title_lower = title.lower()
-            extra_kw = [kw for kw in keywords if kw.lower() not in title_lower][:2]
-            if extra_kw:
-                queries.append(f"{title} {' '.join(extra_kw)}")
-
+        
+        # Core topic keywords that MUST appear in every query
+        topic_keywords = [
+            "deformable object grasping",
+            "dexterous manipulation",
+            "soft object grasping",
+            "robotic grasping",
+            "cloth manipulation",
+            "tactile grasping"
+        ]
+        
+        # Chapter-specific English keywords mapping
+        chapter_keywords = {
+            "introduction": ["survey", "review", "overview"],
+            "non_rl_method": ["analytical planning", "model-based", "trajectory optimization", 
+                             "visual servoing", "learning from demonstration"],
+            "deep_rl_method": ["reinforcement learning grasping", "deep RL manipulation",
+                              "PPO SAC TD3", "sim-to-real transfer"],
+            "mixed_and_SOTA_method": ["hybrid learning", "foundation model grasping",
+                                     "diffusion policy", "vision language model"],
+            "experiment_and_performance": ["benchmark grasping", "evaluation metrics",
+                                          "simulation MuJoCo IsaacGym"],
+            "challenges_and_trends": ["challenges grasping", "future directions",
+                                     "embodied intelligence"],
+            "conclusion": ["conclusion", "summary"]
+        }
+        
+        chapter_id = chapter.chapter_id
+        extra_kws = chapter_keywords.get(chapter_id, [])
+        
+        # Query 1: Core topic + first chapter-specific keyword
+        if extra_kws:
+            queries.append(f"{topic_keywords[0]} {extra_kws[0]}")
+        
+        # Query 2: Another topic keyword + another chapter keyword
+        if len(extra_kws) > 1:
+            queries.append(f"{topic_keywords[1]} {extra_kws[1]}")
+        
+        # Query 3: Broader topic search
+        queries.append(f"{topic_keywords[2]} OR {topic_keywords[3]}")
+        
         # Ensure uniqueness and non-empty
         seen: set[str] = set()
         unique: list[str] = []
@@ -263,7 +297,7 @@ class LiteratureSearcher:
 
         sem = self._semaphores.get("semantic_scholar", asyncio.Semaphore(1))
         async with sem:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
                 resp = await client.get(url, params=params, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
@@ -322,7 +356,7 @@ class LiteratureSearcher:
 
         sem = self._semaphores.get("openalex", asyncio.Semaphore(1))
         async with sem:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
                 resp = await client.get(url, params=params)
                 resp.raise_for_status()
                 data = resp.json()
@@ -423,7 +457,7 @@ class LiteratureSearcher:
 
         sem = self._semaphores.get("arxiv", asyncio.Semaphore(1))
         async with sem:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
                 resp = await client.get(base_url, params=params)
                 resp.raise_for_status()
                 xml_text = resp.text
@@ -573,6 +607,34 @@ class LiteratureSearcher:
                 if paper.citation_count >= base_threshold:
                     filtered.append(paper)
 
+        return filtered
+
+    # ------------------------------------------------------------------
+    # Relevance filtering
+    # ------------------------------------------------------------------
+
+    def _filter_by_relevance(self, papers: list[Paper]) -> list[Paper]:
+        """Filter papers to ensure they are related to the main topic."""
+        topic_terms = [
+            "grasp", "grasping", "manipulation", "dexterous", "deformable",
+            "soft object", "cloth", "tactile", "compliant", "robotic hand",
+            "gripper", "prehension", "pick and place",
+            "contact-rich", "sim-to-real", "reinforcement learning",
+            "policy learning", "diffusion policy"
+        ]
+        
+        filtered = []
+        for paper in papers:
+            text = f"{paper.title} {paper.abstract}".lower()
+            if any(term in text for term in topic_terms):
+                filtered.append(paper)
+            else:
+                logger.debug("Filtered out (irrelevant): %s", paper.title[:60])
+        
+        logger.info(
+            "Relevance filtering: %d -> %d papers",
+            len(papers), len(filtered)
+        )
         return filtered
 
     # ------------------------------------------------------------------

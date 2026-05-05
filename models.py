@@ -252,7 +252,10 @@ class AgentCheckpoint:
         p = Path(path)
         if not p.exists():
             return cls(agent_name=p.stem)
-        return cls.from_json(p.read_text(encoding="utf-8"))
+        text = p.read_text(encoding="utf-8").strip()
+        if not text:
+            return cls(agent_name=p.stem)
+        return cls.from_json(text)
 
 
 # ============================================================

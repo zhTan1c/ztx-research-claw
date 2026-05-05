@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from openai import OpenAI
 
 from models import (
@@ -53,7 +54,8 @@ class CitationFormatter:
         self.default_max_tokens: int = llm_cfg.get("max_tokens", 8192)
 
         # 创建 OpenAI 客户端（DeepSeek 兼容 OpenAI 接口）
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        http_client = httpx.Client(trust_env=True)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         logger.info(
             "CitationFormatter LLM 客户端初始化: model=%s, base_url=%s",
             self.model,
