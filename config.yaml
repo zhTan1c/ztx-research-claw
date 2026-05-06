@@ -83,7 +83,7 @@ search:
     enabled: true
     base_url: "https://api.semanticscholar.org/graph/v1"
     api_key: null
-    user_agent_email: "2927921700@qq.com"
+    user_agent_email: "shangtangfanqiejiang@gmail.com"
     rate_limit: 100
     fields: "paperId,title,abstract,year,citationCount,referenceCount,authors,venue,openAccessPdf,tldr,influentialCitationCount"
     query: "{keyword}"
@@ -108,7 +108,7 @@ search:
     rate_limit: 10
     filter_topics: []
     max_results_per_query: 100
-    mailto: "2927921700@qq.com"
+    mailto: "shangtangfanqiejiang@gmail.com"
 
   arxiv:
     enabled: true
@@ -129,7 +129,7 @@ search:
     base_url: "https://api.crossref.org/works"
     api_key: null
     rate_limit: 50
-    mailto: "2927921700@qq.com"
+    mailto: "shangtangfanqiejiang@gmail.com"
 
   dblp:
     enabled: true
@@ -141,7 +141,7 @@ search:
   unpaywall:
     enabled: true
     base_url: "https://api.unpaywall.org/v2"
-    email: "2927921700@qq.com"
+    email: "shangtangfanqiejiang@gmail.com"
 
 # ------------------------------------------------------------
 # 3. 网络代理配置
@@ -172,11 +172,11 @@ agents:
 
   literature_searcher:
     model: "mimo_v25_pro"
-    seed_papers_file: "./outputs/papers/paper_example/引用论文.md"  # 用户手写种子论文
+    seed_papers_file: "./data/paper_example.md"  # 用户手写种子论文
     search_pipeline: ["semantic_scholar", "openalex", "arxiv"]
     deduplication: true
     dedup_threshold: 0.85
-    max_total_papers: 20
+    max_total_papers: 500
     relevance_scoring:
       citation_weight: 0.3
       recency_weight: 0.2

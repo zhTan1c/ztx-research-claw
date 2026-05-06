@@ -88,6 +88,7 @@
 pip install openai pyyaml pdfplumber httpx aiohttp aiofiles tenacity python-dotenv
 ```
 
+---
 
 ## 2026-05-05 — 代码审查与问题修复
 
@@ -155,6 +156,28 @@ pip install openai pyyaml pdfplumber httpx aiohttp aiofiles tenacity python-dote
 - `outputs/references.bib` — 生成的参考文献
 - `.conda/` / `miniconda3/` — conda 环境
 
+#### 8. 文献检索逻辑重构
+
+**问题：** 原有逻辑用关键词组合搜索，返回大量不相关论文。
+
+**新逻辑：**
+1. 先读取每章的提示词文件
+2. 调用 LLM（MiMo V2.5 Pro）推荐该章应该引用的论文标题
+3. 用论文标题去 Semantic Scholar/arXiv 精确搜索
+4. 下载搜到的 PDF
+
+**修改内容：**
+- `agents/literature_searcher.py`：
+  - 添加 OpenAI 导入和 LLM 客户端初始化
+  - 新增 `_ask_llm_for_papers()` 方法：调用 LLM 推荐论文标题
+  - 重写 `_generate_queries()` 方法：改为 async，调用 LLM 获取论文标题作为搜索查询
+  - 修改 `run()` 方法：使用 `await` 调用 `_generate_queries()`
+- `config.yaml`：`max_total_papers` 从 200 调整为 500
+
+#### 9. 种子论文路径更新
+
+**修改内容：** `config.yaml` 中 `seed_papers_file` 路径从 `./outputs/papers/paper_example/引用论文.md` 改为 `./data/paper_example.md`
+
 ### 依赖安装
 
 ```bash
@@ -163,206 +186,78 @@ pip install httpx[socks]  # 新增：SOCKS5 代理支持
 
 ---
 
-## 2026-05-06 — PDF 下载源修复 + 种子论文系统
+## 2026-05-06 — PDF 下载源修复 + 种子论文系统 + 运行问题修复
 
 ### 完成内容
 
-修复 PDF 下载偏向 OpenAlex 出版商链接的问题；新增种子论文解析器和 citation expansion 机制。
+修复 PDF 下载偏向 OpenAlex 出版商链接的问题；新增种子论文解析器和 citation expansion 机制；修复首轮运行暴露的多个问题。
 
-### 问题发现
+### 问题发现与修复
 
-用户反馈：下载的论文 PDF 基本都来自 OpenAlex，而非 Semantic Scholar 和 arXiv。
+#### 1. PDF 下载源修复
 
-### 根因分析
+**问题：** 下载的论文 PDF 基本都来自 OpenAlex，而非 Semantic Scholar 和 arXiv。
 
-1. **去重逻辑偏好 OpenAlex**：同一论文在 OpenAlex（citation_count > 0）和 arXiv（citation_count = 0）都有时，OpenAlex 版本因引用数更高而胜出
-2. **OpenAlex 的 `oa_url` 质量差**：经常指向出版商网站（Springer、IEEE），需要机构权限
-3. **arXiv 的免费直链被丢弃**：arXiv 版本在去重时被淘汰，其 PDF 直链随之丢失
+**根因：**
+- 去重逻辑偏好 OpenAlex（citation_count > 0）而丢弃 arXiv（citation_count = 0）
+- OpenAlex 的 `oa_url` 质量差，经常指向出版商网站
+- arXiv 的免费直链被丢弃
 
-### 修改内容
+**修改内容：**
+- `agents/literature_searcher.py`：新增 `_enrich_pdf_links()` 方法，去重后强制将有 arxiv_id 的论文 pdf_url 覆盖为 arXiv 直链
+- `agents/pdf_downloader.py`：新增 `arxiv_search` 下载源，用论文标题精确搜索 arXiv API
+- `config.yaml`：`sources_priority` 中 `dblp_bib` 替换为 `arxiv_search`
 
-#### 1. literature_searcher.py — PDF 链接修正（`_enrich_pdf_links`）
+#### 2. 种子论文系统
 
-去重后遍历所有论文，如果论文有 `arxiv_id`，强制把 `pdf_url` 覆盖为 `https://arxiv.org/pdf/{arxiv_id}.pdf`。arXiv PDF 永远免费，不需要登录。
+**新增文件：**
+- `agents/seed_paper_parser.py`（140 行）：解析用户手写的 `引用论文.md`，输出 Paper 对象列表
 
-在 `run()` 方法中，去重和相关性过滤之间插入调用：
-```python
-deduped = self._deduplicate(all_papers, self.dedup_threshold)
-deduped = self._enrich_pdf_links(deduped)  # 新增
-```
+**修改内容：**
+- `agents/literature_searcher.py`：新增种子论文注入 + Citation Expansion 机制
+- `main.py`：传递 `seed_papers_file` 参数
+- `config.yaml`：新增 `seed_papers_file` 配置
 
-#### 2. pdf_downloader.py — arXiv 标题搜索兜底（`_search_arxiv_by_title`）
+#### 3. max_results_per_query 过小
 
-新增 `arxiv_search` 下载源：当 `open_access_pdf`、`arxiv_pdf`、`unpaywall` 都失败时，用论文标题精确搜索 arXiv API，找到后返回 PDF 直链。
+**问题：** config.yaml 中三个检索源的 `max_results_per_query` 都被设为 10，导致文献池严重不足。
 
-#### 3. config.yaml — sources_priority 调整
+**修复：** S2 / OpenAlex / arXiv 全部改回 100。
 
-```yaml
-# 之前
-- "open_access_pdf"
-- "arxiv_pdf"
-- "unpaywall"
-- "dblp_bib"        # 只返回元数据，不返回 PDF
+#### 4. S2 enrichment 限流导致管线崩溃
 
-# 现在
-- "open_access_pdf"
-- "arxiv_pdf"
-- "unpaywall"
-- "arxiv_search"    # arXiv 标题搜索兜底
-```
+**问题：** 22 篇种子论文连续请求 S2 API，触发 429 限流，tenacity 重试失败后崩溃。
 
-### 新增功能：种子论文系统
+**修复：** `_enrich_seeds_via_s2` 方法每次请求间隔 1 秒，整个 enrichment 块用 try-except 包裹。
 
-#### 4. agents/seed_paper_parser.py（新文件，140 行）
+#### 5. 种子论文解析器格式不匹配
 
-解析用户手写的 `引用论文.md`，输出 Paper 对象列表：
-- 正则匹配 `- **论文**: [N] Title` 格式
-- 提取标题、年份、venue、arXiv ID、DOI
-- 跳过【待补充】条目
-- source 标记为 "seed" 以区分自动检索的论文
-- 实测：解析出 22 篇种子论文（20 篇有 arXiv ID）
+**问题：** 用户修改了 `引用论文.md` 格式，删掉了 `[N]` 中括号和数字。
 
-#### 5. literature_searcher.py — 种子论文注入 + Citation Expansion（新增 ~200 行）
+**修复：** 正则改为兼容两种格式。
 
-**`_enrich_seeds_via_s2(seeds)`**：通过 Semantic Scholar 补全种子论文的元数据
-- 查找策略：arXiv ID → DOI → 标题搜索（相似度 ≥ 0.90）
-- 补全字段：abstract, citation_count, influential_citation_count, authors, venue, doi
-- 带 tenacity 重试（3 次）+ 429 限流处理
+#### 6. Readme 更新
 
-**`_expand_citations(seeds, depth)`**：从种子论文出发，沿引用网络扩展
-- 获取每篇种子的 references（它引用了谁）→ 时间轴上的前序工作
-- 获取每篇种子的 citations（谁引用了它）→ 时间轴上的后续改进
-- 每篇种子展开约 200 篇相关论文
-
-**`_fetch_s2_relations(paper_id, relation)`**：底层 S2 API 调用
-- 带 tenacity 重试 + 429 限流处理
-- 解析 references/citations 响应为 Paper 对象
-
-#### 6. main.py — 种子论文路径传递
-
-```python
-seed_file = config.get("agents", {}).get("literature_searcher", {}).get("seed_papers_file")
-papers = await searcher.run(chapters, seed_papers_file=seed_file)
-```
-
-#### 7. config.yaml — 种子论文配置
-
-```yaml
-agents:
-  literature_searcher:
-    seed_papers_file: "./outputs/papers/paper_example/引用论文.md"
-```
-
-### 数据流变化
-
-```
-Phase 2: 文献检索（修改后）
-  │
-  ├── 1. 解析引用论文.md → 22 篇种子论文
-  ├── 2. S2 enrichment → 补全元数据
-  ├── 3. Citation expansion → ~4000+ 候选论文
-  ├── 4. 三源关键词检索 → 补充论文
-  ├── 5. 合并 → 全部论文池
-  ├── 6. 去重 + PDF 链接修正（优先 arXiv 直链）
-  └── 7. 相关性过滤 + 引用评分 → Top 200
-```
-
-### 自检结果
-
-- seed_paper_parser.py 语法检查：通过 ✓
-- literature_searcher.py 语法检查：通过 ✓
-- main.py 语法检查：通过 ✓
-- 种子论文解析测试：22 篇，20 篇有 arXiv ID，20 篇有 PDF URL ✓
-- 新增方法存在性检查：全部通过 ✓
-- S2 API 连通性测试：429 限流（预期行为，tenacity 重试机制已就位）✓
-
-### 注意事项
-
-- S2 免费 API 有速率限制（~100 req/min），大规模 citation expansion 可能触发 429
-- 种子论文中有些 arXiv ID 因同一论文在多章节重复出现而被错误关联，S2 enrichment 会通过标题搜索修正
-- 如果 S2 持续限流，可申请 API Key（https://www.semanticscholar.org/product/api#api-key-form）
-
----
-
-## 2026-05-06 — 运行问题修复 + Readme 更新
-
-### 完成内容
-
-修复首轮运行暴露的多个问题：参数过小、S2 限流崩溃、解析器格式不匹配、架构图过时。
-
-### 问题与修复
-
-#### 1. max_results_per_query 过小
-
-**问题**：config.yaml 中三个检索源的 `max_results_per_query` 都被设为 10（原设计值为 100），导致每轮只搜 10 篇论文，最终文献池严重不足，各章引用数远低于目标（如第2章目标10篇实际0篇，第3章目标35篇实际3篇）。
-
-**修复**：S2 / OpenAlex / arXiv 全部改回 100。
-
-#### 2. S2 enrichment 限流导致管线崩溃
-
-**问题**：22 篇种子论文连续请求 S2 API，触发 429 限流。tenacity 重试 3 次后仍然失败，抛出 RetryError 导致整个管线崩溃。
-
-**修复**（`agents/literature_searcher.py`）：
-- `_enrich_seeds_via_s2` 方法：每次请求间隔 1 秒（`asyncio.sleep(1.0)`）
-- 整个 enrichment 块用 try-except 包裹，失败时 warning 日志 + 保留种子论文原始元数据继续运行
-- 不再因为 S2 限流而崩溃
-
-#### 3. 种子论文解析器格式不匹配
-
-**问题**：用户修改了 `引用论文.md` 格式，删掉了 `[N]` 中括号和数字（如 `[2] Folding Clothes...` → `Folding Clothes...`），导致解析器正则 `\[\d+\]` 匹配失败。
-
-**修复**（`agents/seed_paper_parser.py`）：
-- 正则改为 `r"- \*\*论文\*\*:\s*(?:\[\d+\]\s*)?(.+)"`，兼容两种格式
-- 实测：22 篇种子论文全部正确解析
-
-#### 4. Readme 顶部架构图更新
-
-**修改内容**：
 - Phase 2 新增：种子论文解析 → S2 enrichment → Citation expansion → 去重 + PDF 链接修正
 - Phase 3：`dblp元数据` → `arXiv标题搜索`
-- 底部新增：种子论文系统说明
-
-#### 5. Readme 核心代码实现部分更新
-
-**修改内容**：
-- 代码概览表：新增 seed_paper_parser.py，更新总行数（4562 行 / 11 文件）
-- 数据流图：Phase 2 展开为 6 步
-- Agent 实现要点：新增 seed_paper_parser 章节，更新 literature_searcher 和 pdf_downloader 描述
-- 项目结构：新增 seed_paper_parser.py
-
-### 运行结果分析（首轮）
-
-从 agent.log 提取的关键数据：
-- Phase 1-3：成功（种子论文 + 检索 + 下载）
-- Phase 4（paper_reader）：20 篇论文阅读完成
-- Phase 5（methodology_analyst）：7 个 taxonomy 条目
-- Phase 6（writer）：7 章全部写完，但引用数不足
-  - introduction: 9 条引用 ✓
-  - non_rl_method: 0 条引用 ✗（目标 10）
-  - deep_rl_method: 3 条引用 ✗（目标 35）
-  - mixed_and_SOTA_method: 4 条引用 ✗（目标 35）
-  - challenges_and_trends: 9 条引用 ✓
-  - conclusion: 4 条引用 ✓
-- Phase 7（citation_formatter）：16 条引用编号，10 条 BibTeX，6 条缺失
-
-**引用不足的根因**：`max_results_per_query=10` 导致文献池太小，修复后重新运行应显著改善。
-
-### Git 问题
-
-**问题**：outputs/drafts/ 和 outputs/papers/ 被 commit 进了 git，尽管 .gitignore 已配置。
-
-**根因**：这些文件在 .gitignore 添加之前就已经被 `git add` 跟踪了。Git 的规则是：已跟踪的文件不受 .gitignore 影响。
-
-**修复**：
-```bash
-git rm --cached -r outputs/papers/ outputs/drafts/ outputs/checkpoints/ outputs/references.bib outputs/agent.log outputs/checkpoint.pkl
-git commit -m "chore: untrack generated output files"
-```
-
-`--cached` 只从 git 索引移除，不删除本地文件。
+- 代码概览表：新增 seed_paper_parser.py，更新总行数
 
 ### 依赖安装
 
 无新增依赖。
 
 ---
+
+## 2026-05-07 — 目录结构调整
+
+### 完成内容
+
+将 `paper_example.md` 从 `outputs/papers/paper_example/` 移动到 `data/` 目录，与 `outline.md` 放在一起。
+
+### 修改内容
+
+- `config.yaml`：`seed_papers_file` 路径从 `./outputs/papers/paper_example/引用论文.md` 改为 `./data/paper_example.md`
+
+### 原因
+
+种子论文文件是输入数据，不是生成的输出，应该放在 `data/` 目录下。

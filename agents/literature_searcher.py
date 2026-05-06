@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from models import AgentCheckpoint, Chapter, Paper, SearchResult
@@ -58,6 +59,18 @@ class LiteratureSearcher:
 
         # HTTP timeout
         self.timeout: float = self.network_cfg.get("timeout", 30)
+
+        # LLM client for paper recommendation
+        llm_cfg: dict = config.get("llm", {}).get("mimo_v25_pro", {})
+        import httpx as _httpx
+        _http_client = _httpx.Client(trust_env=True)
+        self.llm_client = OpenAI(
+            base_url=llm_cfg.get("base_url", ""),
+            api_key=llm_cfg.get("api_key", ""),
+            http_client=_http_client,
+        )
+        self.llm_model: str = llm_cfg.get("model", "mimo-v2.5-pro")
+        self.prompts_cfg: dict = config.get("prompts", {})
 
         # Rate-limit semaphores per source
         self._semaphores: dict[str, asyncio.Semaphore] = {}
@@ -110,10 +123,10 @@ class LiteratureSearcher:
                     all_papers.extend(expanded)
                     logger.info("Citation expansion: %d papers discovered from seeds", len(expanded))
 
-        # Generate queries for every chapter
+        # Generate queries for every chapter (now async, calls LLM)
         chapter_queries: list[tuple[str, str]] = []  # (query, chapter_id)
         for chapter in chapters:
-            queries = self._generate_queries(chapter)
+            queries = await self._generate_queries(chapter)
             for q in queries:
                 chapter_queries.append((q, chapter.chapter_id))
 
@@ -219,65 +232,94 @@ class LiteratureSearcher:
         ascii_chars = sum(1 for c in query if ord(c) < 128)
         return ascii_chars / len(query) > 0.5 if query else False
 
-    def _generate_queries(self, chapter: Chapter) -> list[str]:
-        """Generate search queries for academic paper databases.
+    async def _ask_llm_for_papers(self, chapter: Chapter) -> list[str]:
+        """Ask LLM to recommend paper titles based on chapter prompt.
         
-        Since we're searching English databases (Semantic Scholar, OpenAlex, arXiv),
-        we must use English keywords. Each query MUST include topic-specific terms
-        to ensure relevance.
+        Returns a list of paper titles that should be cited in this chapter.
         """
-        queries: list[str] = []
+        # Read chapter prompt file
+        prompt_file = chapter.prompt_file
+        prompt_content = ""
+        if prompt_file:
+            prompt_path = Path(prompt_file)
+            if prompt_path.exists():
+                prompt_content = prompt_path.read_text(encoding="utf-8")
         
-        # Core topic keywords that MUST appear in every query
-        topic_keywords = [
-            "deformable object grasping",
-            "dexterous manipulation",
-            "soft object grasping",
-            "robotic grasping",
-            "cloth manipulation",
-            "tactile grasping"
-        ]
+        if not prompt_content:
+            logger.warning("No prompt file found for chapter %s, using chapter title only", chapter.chapter_id)
+            prompt_content = f"章节主题: {chapter.title}"
         
-        # Chapter-specific English keywords mapping
-        chapter_keywords = {
-            "introduction": ["survey", "review", "overview"],
-            "non_rl_method": ["analytical planning", "model-based", "trajectory optimization", 
-                             "visual servoing", "learning from demonstration"],
-            "deep_rl_method": ["reinforcement learning grasping", "deep RL manipulation",
-                              "PPO SAC TD3", "sim-to-real transfer"],
-            "mixed_and_SOTA_method": ["hybrid learning", "foundation model grasping",
-                                     "diffusion policy", "vision language model"],
-            "experiment_and_performance": ["benchmark grasping", "evaluation metrics",
-                                          "simulation MuJoCo IsaacGym"],
-            "challenges_and_trends": ["challenges grasping", "future directions",
-                                     "embodied intelligence"],
-            "conclusion": ["conclusion", "summary"]
-        }
-        
-        chapter_id = chapter.chapter_id
-        extra_kws = chapter_keywords.get(chapter_id, [])
-        
-        # Query 1: Core topic + first chapter-specific keyword
-        if extra_kws:
-            queries.append(f"{topic_keywords[0]} {extra_kws[0]}")
-        
-        # Query 2: Another topic keyword + another chapter keyword
-        if len(extra_kws) > 1:
-            queries.append(f"{topic_keywords[1]} {extra_kws[1]}")
-        
-        # Query 3: Broader topic search
-        queries.append(f"{topic_keywords[2]} OR {topic_keywords[3]}")
-        
-        # Ensure uniqueness and non-empty
-        seen: set[str] = set()
-        unique: list[str] = []
-        for q in queries:
-            q = q.strip()
-            if q and q.lower() not in seen:
-                seen.add(q.lower())
-                unique.append(q)
+        # Build LLM prompt
+        system_prompt = """你是一位学术论文推荐专家。你的任务是根据综述章节的写作要求，推荐该章节应该引用的论文。
 
-        return unique[:3]
+要求：
+1. 推荐的论文必须是真实存在的、已发表的学术论文
+2. 优先推荐高引用、有影响力的经典论文
+3. 推荐近3年的最新研究进展
+4. 每个推荐必须包含完整的论文标题（英文）
+5. 不要编造论文，只推荐你确信存在的论文
+
+输出格式：每行一篇论文的标题，不要编号，不要其他内容。
+例如：
+Deep Reinforcement Learning for Robotic Manipulation with Asynchronous Off-Policy Updates
+Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor"""
+
+        user_prompt = f"""以下是综述第 {chapter.chapter_num} 章的写作要求：
+
+{prompt_content}
+
+请推荐 {chapter.target_citations} 篇应该在本章引用的论文标题。
+只输出论文标题，每行一篇，不要其他内容。"""
+
+        try:
+            logger.info("Calling LLM to recommend papers for chapter %s...", chapter.chapter_id)
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+            )
+            content = response.choices[0].message.content or ""
+            
+            # Parse paper titles (one per line)
+            titles = []
+            for line in content.strip().split("\n"):
+                line = line.strip()
+                # Skip empty lines, numbered items, or lines that look like headers
+                if not line or line.startswith("#") or line.startswith("以下是"):
+                    continue
+                # Remove numbering like "1. " or "- "
+                line = re.sub(r"^[\d]+\.\s*", "", line)
+                line = re.sub(r"^[-*]\s*", "", line)
+                if len(line) > 10:  # Minimum reasonable title length
+                    titles.append(line)
+            
+            logger.info("LLM recommended %d papers for chapter %s", len(titles), chapter.chapter_id)
+            return titles
+            
+        except Exception as exc:
+            logger.error("Failed to get paper recommendations from LLM: %s", exc)
+            return []
+
+    async def _generate_queries(self, chapter: Chapter) -> list[str]:
+        """Generate search queries by asking LLM for paper recommendations.
+        
+        Instead of using keyword-based queries, we ask the LLM to recommend
+        specific paper titles based on the chapter's prompt file, then use
+        those titles for precise search on Semantic Scholar/arXiv.
+        """
+        # Ask LLM for paper recommendations
+        paper_titles = await self._ask_llm_for_papers(chapter)
+        
+        if not paper_titles:
+            logger.warning("LLM returned no paper titles for chapter %s, falling back to keyword search", chapter.chapter_id)
+            # Fallback: use topic keywords
+            return ["deformable object grasping", "dexterous manipulation"]
+        
+        return paper_titles
 
     # ------------------------------------------------------------------
     # Dispatch
