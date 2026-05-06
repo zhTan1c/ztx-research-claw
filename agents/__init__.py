@@ -10,6 +10,7 @@ from agents.paper_reader import PaperReader
 from agents.methodology_analyst import MethodologyAnalyst
 from agents.writer import Writer
 from agents.citation_formatter import CitationFormatter
+from agents.seed_paper_parser import parse_seed_papers
 
 __all__ = [
     "OutlineParser",
@@ -19,4 +20,5 @@ __all__ = [
     "MethodologyAnalyst",
     "Writer",
     "CitationFormatter",
+    "parse_seed_papers",
 ]

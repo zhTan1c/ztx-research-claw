@@ -289,7 +289,8 @@ async def main():
     else:
         logger.info("Phase 2: 文献检索...")
         searcher = LiteratureSearcher(config)
-        papers = await searcher.run(chapters)
+        seed_file = config.get("agents", {}).get("literature_searcher", {}).get("seed_papers_file")
+        papers = await searcher.run(chapters, seed_papers_file=seed_file)
         checkpoint["literature_searcher"] = papers
         save_checkpoint(checkpoint, checkpoint_path)
         logger.info("Phase 2 完成，checkpoint 已保存。")

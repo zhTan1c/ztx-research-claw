@@ -91,7 +91,7 @@ search:
       - "Robotics"
       - "Computer Vision"
       - "Engineering"
-    max_results_per_query: 10
+    max_results_per_query: 100
     citation_scoring:
       base_threshold: 5
       recent_years: 3
@@ -122,7 +122,7 @@ search:
       - "cs.SY"
     sort_by: "submittedDate"
     sort_order: "descending"
-    max_results_per_query: 10
+    max_results_per_query: 100
 
   crossref:
     enabled: true
@@ -172,6 +172,7 @@ agents:
 
   literature_searcher:
     model: "mimo_v25_pro"
+    seed_papers_file: "./outputs/papers/paper_example/引用论文.md"  # 用户手写种子论文
     search_pipeline: ["semantic_scholar", "openalex", "arxiv"]
     deduplication: true
     dedup_threshold: 0.85
@@ -187,7 +188,7 @@ agents:
       - "open_access_pdf"
       - "arxiv_pdf"
       - "unpaywall"
-      - "dblp_bib"
+      - "arxiv_search"                       # arXiv 标题搜索兜底
     download_timeout: 60
     max_concurrent: 5
     # 下载时同步记录引用元数据，输出给 citation_formatter

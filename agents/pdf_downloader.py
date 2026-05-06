@@ -121,6 +121,9 @@ class PDFDownloader:
                     elif source == "unpaywall":
                         if paper.doi:
                             url = await self._try_unpaywall(paper.doi, self.unpaywall_cfg)
+                    elif source == "arxiv_search":
+                        # Last resort: search arXiv by title
+                        url = await self._search_arxiv_by_title(paper.title, client)
                     else:
                         logger.debug("Unknown source %s — skipping", source)
                         continue
@@ -231,6 +234,40 @@ class PDFDownloader:
     # ------------------------------------------------------------------
     # Citation extraction
     # ------------------------------------------------------------------
+
+    async def _search_arxiv_by_title(
+        self,
+        title: str,
+        client: httpx.AsyncClient,
+    ) -> Optional[str]:
+        """Search arXiv by paper title and return the PDF URL if found."""
+        if not title:
+            return None
+        try:
+            base_url = "https://export.arxiv.org/api/query"
+            params = {
+                "search_query": f'ti:"{title}"',
+                "max_results": 1,
+            }
+            resp = await client.get(base_url, params=params, timeout=30)
+            if resp.status_code != 200:
+                return None
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.text)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            for entry in root.findall("atom:entry", ns):
+                for link in entry.findall("atom:link", ns):
+                    if link.get("title") == "pdf" or link.get("type") == "application/pdf":
+                        return link.get("href")
+                # Fallback: extract ID and construct PDF URL
+                id_el = entry.find("atom:id", ns)
+                if id_el is not None and id_el.text:
+                    m = re.search(r"(\d{4}\.\d{4,5})(v\d+)?$", id_el.text)
+                    if m:
+                        return f"https://arxiv.org/pdf/{m.group(1)}.pdf"
+        except Exception as exc:
+            logger.debug("arXiv title search failed for '%s': %s", title[:50], exc)
+        return None
 
     def _extract_citation(self, paper: Paper) -> str:
         """Generate a preliminary BibTeX string from existing paper metadata."""

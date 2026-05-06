@@ -18,6 +18,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from models import AgentCheckpoint, Chapter, Paper, SearchResult
+from agents.seed_paper_parser import parse_seed_papers
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,18 @@ class LiteratureSearcher:
     # Public API
     # ------------------------------------------------------------------
 
-    async def run(self, chapters: list[Chapter]) -> list[Paper]:
-        """Search papers for all chapters and return deduplicated, ranked list."""
+    async def run(
+        self,
+        chapters: list[Chapter],
+        seed_papers_file: str | None = None,
+    ) -> list[Paper]:
+        """Search papers for all chapters and return deduplicated, ranked list.
+ 
+        If *seed_papers_file* is given (e.g. ``data/引用论文.md``), parse it
+        for user-curated seed papers, enrich them via Semantic Scholar, then
+        expand via citation/references to discover related work along the
+        timeline.
+        """
         logger.info("LiteratureSearcher: starting search for %d chapters", len(chapters))
 
         # Load checkpoint if available
@@ -79,6 +90,25 @@ class LiteratureSearcher:
         all_papers: list[Paper] = []
         for p_data in checkpoint.data.get("papers", []):
             all_papers.append(Paper.from_dict(p_data))
+
+        # ── Seed papers ─────────────────────────────────────────────
+        if seed_papers_file:
+            seed_papers = parse_seed_papers(seed_papers_file)
+            if seed_papers:
+                logger.info("Loaded %d seed papers, enriching via S2...", len(seed_papers))
+                enriched_seeds = await self._enrich_seeds_via_s2(seed_papers)
+                all_papers.extend(enriched_seeds)
+                logger.info("Enriched seeds: %d papers added to pool", len(enriched_seeds))
+
+                # Citation expansion from seeds
+                expansion_cfg = self.search_cfg.get("semantic_scholar", {}).get(
+                    "citation_expansion", {}
+                )
+                if expansion_cfg.get("enabled", True):
+                    depth = expansion_cfg.get("depth", 1)
+                    expanded = await self._expand_citations(enriched_seeds, depth)
+                    all_papers.extend(expanded)
+                    logger.info("Citation expansion: %d papers discovered from seeds", len(expanded))
 
         # Generate queries for every chapter
         chapter_queries: list[tuple[str, str]] = []  # (query, chapter_id)
@@ -122,6 +152,10 @@ class LiteratureSearcher:
         # Deduplicate
         deduped = self._deduplicate(all_papers, self.dedup_threshold)
         logger.info("After deduplication: %d papers (from %d)", len(deduped), len(all_papers))
+
+        # Cross-source enrichment: prefer arXiv PDF links over publisher links
+        deduped = self._enrich_pdf_links(deduped)
+        logger.info("After PDF link enrichment: %d papers with pdf_url", sum(1 for p in deduped if p.pdf_url))
 
         # Filter by relevance to topic first
         relevant = self._filter_by_relevance(deduped)
@@ -542,8 +576,274 @@ class LiteratureSearcher:
         return papers
 
     # ------------------------------------------------------------------
+    # Seed paper enrichment & citation expansion
+    # ------------------------------------------------------------------
+
+    async def _enrich_seeds_via_s2(self, seeds: list[Paper]) -> list[Paper]:
+        """Enrich seed papers with metadata from Semantic Scholar.
+
+        For each seed paper, try to find it in S2 by arXiv ID or title,
+        then fill in abstract, citation_count, authors, venue, etc.
+        """
+        s2_cfg = self.search_cfg.get("semantic_scholar", {})
+        base_url = s2_cfg.get("base_url", "https://api.semanticscholar.org/graph/v1")
+        fields = s2_cfg.get(
+            "fields",
+            "paperId,title,abstract,year,citationCount,referenceCount,"
+            "authors,venue,openAccessPdf,tldr,influentialCitationCount,"
+            "externalIds,references,references.paperId,references.title,"
+            "references.externalIds",
+        )
+
+        sem = self._semaphores.get("semantic_scholar", asyncio.Semaphore(5))
+        enriched: list[Paper] = []
+
+        async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
+            for i, seed in enumerate(seeds):
+                paper_data = None
+                try:
+                    async with sem:
+                        # Strategy 1: lookup by arXiv ID
+                        if seed.arxiv_id:
+                            paper_data = await self._s2_lookup(
+                                client, f"ARXIV:{seed.arxiv_id}", base_url, fields
+                            )
+                        # Strategy 2: lookup by DOI
+                        if not paper_data and seed.doi:
+                            paper_data = await self._s2_lookup(
+                                client, f"DOI:{seed.doi}", base_url, fields
+                            )
+                        # Strategy 3: search by title
+                        if not paper_data and seed.title:
+                            paper_data = await self._s2_search_by_title(
+                                client, seed.title, base_url, fields
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "S2 enrichment failed for seed '%s': %s — keeping original metadata",
+                        seed.title[:50], exc,
+                    )
+                    # paper_data stays None, seed keeps its original metadata
+
+                if paper_data:
+                    # Merge S2 metadata into seed paper
+                    seed.paper_id = paper_data.get("paperId", seed.paper_id)
+                    seed.abstract = paper_data.get("abstract") or seed.abstract
+                    seed.citation_count = paper_data.get("citationCount", 0) or 0
+                    seed.influential_citation_count = (
+                        paper_data.get("influentialCitationCount", 0) or 0
+                    )
+                    seed.authors = [
+                        a.get("name", "")
+                        for a in paper_data.get("authors", [])
+                    ]
+                    seed.venue = paper_data.get("venue") or seed.venue
+                    seed.year = paper_data.get("year") or seed.year
+
+                    ext = paper_data.get("externalIds") or {}
+                    if not seed.doi and ext.get("DOI"):
+                        seed.doi = ext["DOI"]
+                    if not seed.arxiv_id and ext.get("ArXiv"):
+                        seed.arxiv_id = ext["ArXiv"]
+
+                    oa = paper_data.get("openAccessPdf")
+                    if oa and isinstance(oa, dict) and oa.get("url"):
+                        seed.pdf_url = oa["url"]
+
+                    logger.debug("Enriched seed: %s (citations=%d)", seed.title[:50], seed.citation_count)
+                else:
+                    logger.debug("Keeping original metadata for seed: %s", seed.title[:50])
+
+                enriched.append(seed)
+
+                # Rate limit: sleep between requests to avoid 429
+                if i < len(seeds) - 1:
+                    await asyncio.sleep(1.0)  # 1 req/sec to stay under S2 limits
+
+        return enriched
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def _s2_lookup(
+        self,
+        client: httpx.AsyncClient,
+        paper_id: str,
+        base_url: str,
+        fields: str,
+    ) -> Optional[dict]:
+        """Lookup a single paper on S2 by ID (ARXIV:xxx or DOI:xxx)."""
+        url = f"{base_url}/paper/{paper_id}"
+        try:
+            resp = await client.get(url, params={"fields": fields})
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 429:
+                logger.warning("S2 rate limited for %s, will retry", paper_id)
+                raise Exception("Rate limited")
+        except Exception as exc:
+            if "Rate limited" in str(exc):
+                raise
+            logger.debug("S2 lookup failed for %s: %s", paper_id, exc)
+        return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def _s2_search_by_title(
+        self,
+        client: httpx.AsyncClient,
+        title: str,
+        base_url: str,
+        fields: str,
+    ) -> Optional[dict]:
+        """Search S2 by title and return the top match if similarity is high."""
+        url = f"{base_url}/paper/search"
+        try:
+            resp = await client.get(
+                url,
+                params={"query": title, "fields": fields, "limit": 3},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("data", []):
+                    ratio = SequenceMatcher(
+                        None, title.lower(), (item.get("title") or "").lower()
+                    ).ratio()
+                    if ratio >= 0.90:
+                        return item
+                return None
+            if resp.status_code == 429:
+                logger.warning("S2 rate limited for title search, will retry")
+                raise Exception("Rate limited")
+        except Exception as exc:
+            if "Rate limited" in str(exc):
+                raise
+            logger.debug("S2 title search failed for '%s': %s", title[:50], exc)
+        return None
+
+    async def _expand_citations(
+        self, seeds: list[Paper], depth: int = 1
+    ) -> list[Paper]:
+        """Expand from seed papers by following references and citations.
+
+        For each seed, fetch its references (papers it cites) and citations
+        (papers that cite it) from Semantic Scholar.  This discovers the
+        "timeline" of related work that the user wants.
+        """
+        s2_cfg = self.search_cfg.get("semantic_scholar", {})
+        base_url = s2_cfg.get("base_url", "https://api.semanticscholar.org/graph/v1")
+        fields = "paperId,title,abstract,year,citationCount,authors,venue,openAccessPdf,externalIds"
+
+        sem = self._semaphores.get("semantic_scholar", asyncio.Semaphore(5))
+        expanded: list[Paper] = []
+        visited: set[str] = set()
+
+        # Only expand seeds that have a valid S2 paper_id
+        expandable = [s for s in seeds if s.paper_id and s.source != "seed"]
+        if not expandable:
+            # Try with original seed IDs
+            expandable = [s for s in seeds if s.paper_id]
+
+        logger.info("Expanding citations from %d seed papers (depth=%d)", len(expandable), depth)
+
+        async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
+            for seed in expandable:
+                if seed.paper_id in visited:
+                    continue
+                visited.add(seed.paper_id)
+
+                # Fetch references (papers this seed cites)
+                refs = await self._fetch_s2_relations(
+                    client, seed.paper_id, "references", base_url, fields, sem
+                )
+                expanded.extend(refs)
+
+                # Fetch citations (papers that cite this seed)
+                cites = await self._fetch_s2_relations(
+                    client, seed.paper_id, "citations", base_url, fields, sem
+                )
+                expanded.extend(cites)
+
+                # Rate limit: be polite
+                await asyncio.sleep(0.2)
+
+        logger.info("Citation expansion discovered %d raw papers", len(expanded))
+        return expanded
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def _fetch_s2_relations(
+        self,
+        client: httpx.AsyncClient,
+        paper_id: str,
+        relation: str,  # "references" or "citations"
+        base_url: str,
+        fields: str,
+        sem: asyncio.Semaphore,
+    ) -> list[Paper]:
+        """Fetch references or citations for a paper from S2."""
+        url = f"{base_url}/paper/{paper_id}/{relation}"
+        papers: list[Paper] = []
+        try:
+            async with sem:
+                resp = await client.get(url, params={"fields": fields, "limit": 100})
+                if resp.status_code != 200:
+                    if resp.status_code == 429:
+                        logger.warning("S2 rate limited for %s %s, will retry", relation, paper_id)
+                        raise Exception("Rate limited")
+                    logger.debug("S2 %s failed for %s: HTTP %d", relation, paper_id, resp.status_code)
+                    return []
+                data = resp.json()
+
+            for item in data.get("data", []):
+                p = item.get("citedPaper") or item.get("paper") or item
+                if not p or not p.get("paperId"):
+                    continue
+
+                oa = p.get("openAccessPdf")
+                pdf_url = oa.get("url") if oa and isinstance(oa, dict) else None
+                ext = p.get("externalIds") or {}
+
+                paper = Paper(
+                    paper_id=p.get("paperId", ""),
+                    title=p.get("title") or "",
+                    abstract=p.get("abstract") or "",
+                    year=p.get("year"),
+                    citation_count=p.get("citationCount", 0) or 0,
+                    influential_citation_count=p.get("influentialCitationCount", 0) or 0,
+                    authors=[a.get("name", "") for a in p.get("authors", [])],
+                    venue=p.get("venue") or "",
+                    doi=ext.get("DOI"),
+                    arxiv_id=ext.get("ArXiv"),
+                    pdf_url=pdf_url,
+                    source=f"s2_{relation}",
+                )
+                if paper.title:
+                    papers.append(paper)
+
+        except Exception as exc:
+            logger.debug("S2 %s request failed for %s: %s", relation, paper_id, exc)
+
+        return papers
+
+    # ------------------------------------------------------------------
     # Deduplication
     # ------------------------------------------------------------------
+    def _enrich_pdf_links(self, papers: list[Paper]) -> list[Paper]:
+        """Post-dedup enrichment: prefer arXiv PDF links over publisher links.
+
+        If a paper has an arxiv_id, construct the direct arXiv PDF URL and
+        override any publisher-hosted pdf_url.  arXiv PDFs are always free
+        and don't require authentication, unlike publisher sites.
+        """
+        for paper in papers:
+            if paper.arxiv_id:
+                arxiv_pdf = f"https://arxiv.org/pdf/{paper.arxiv_id}.pdf"
+                if paper.pdf_url != arxiv_pdf:
+                    logger.debug(
+                        "Enriching PDF link for '%s': %s -> %s",
+                        paper.title[:50],
+                        paper.pdf_url,
+                        arxiv_pdf,
+                    )
+                    paper.pdf_url = arxiv_pdf
+        return papers
 
     def _deduplicate(self, papers: list[Paper], threshold: float) -> list[Paper]:
         """Remove duplicates based on title similarity using SequenceMatcher."""

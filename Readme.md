@@ -16,10 +16,14 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  Phase 2: 智能文献检索 (literature_searcher)                         │   │
 │  │  [MiMo V2.5 Pro]                                                    │   │
+│  │    └── 解析种子论文 (引用论文.md → 22 篇 Paper)                      │   │
+│  │    └── S2 enrichment: 补全种子元数据 (abstract, citations, authors)   │   │
+│  │    └── Citation expansion: 种子的 references + citations             │   │
 │  │    └── 按章节主题 → Semantic Scholar (主力)                          │   │
 │  │                   → OpenAlex (补全)                                  │   │
 │  │                   → arXiv (预印本)                                   │   │
-│  │    └── 年份加权过滤 (近3年降阈值) + 跨源去重                          │   │
+│  │    └── 去重 + PDF 链接修正 (优先 arXiv 直链)                         │   │
+│  │    └── 年份加权过滤 (近3年降阈值) + 相关性评分                        │   │
 │  │    └── 输出候选文献池 (含元数据、OA-PDF链接、引用数)                   │   │
 │  │    └── ▶ Checkpoint: outputs/checkpoints/literature_searcher.json    │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
@@ -28,7 +32,7 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  Phase 3: PDF 下载与引用采集 (pdf_downloader)                        │   │
 │  │  [MiMo V2.5 Pro]                                                    │   │
-│  │    └── 优先级: S2 OA链接 → arXiv直链 → Unpaywall → dblp元数据         │   │
+│  │    └── 优先级: S2 OA链接 → arXiv直链 → Unpaywall → arXiv标题搜索     │   │
 │  │    └── 下载 PDF 至 outputs/papers/                                   │   │
 │  │    └── 同步提取引用元数据 → preliminary_bib (供 citation_formatter)   │   │
 │  │    └── ▶ Checkpoint: outputs/checkpoints/pdf_downloader.json         │   │
@@ -95,6 +99,9 @@
 │  │   └─ outline_parser → literature_searcher → pdf_downloader → paper_reader│
 │  └─ DeepSeek V4 Pro (深度推理 / 结构化写作 / Think High~Max)                │
 │      └─ methodology_analyst → writer → citation_formatter                  │
+│                                                                             │
+│  种子论文系统: seed_paper_parser → literature_searcher (S2 enrichment +     │
+│               citation expansion) → 文献池                                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  断点恢复: 任意 Phase 崩溃后，读取对应 checkpoint/*.json，跳过已完成阶段      │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -112,7 +119,8 @@ ztx-research-claw/
 ├── agents/
 │   ├── __init__.py
 │   ├── outline_parser.py         # MiMo：读综述框架 (data/outline.md)
-│   ├── literature_searcher.py    # MiMo：多轮检索、筛选、去重
+│   ├── seed_paper_parser.py      # 解析用户手写种子论文 (引用论文.md)
+│   ├── literature_searcher.py    # MiMo：多轮检索 + 种子注入 + 引用扩展
 │   ├── pdf_downloader.py         # MiMo：下载论文 + 记录引用格式（生成初步引用库）
 │   ├── paper_reader.py           # MiMo：长文本阅读、提取关键信息
 │   ├── methodology_analyst.py    # DeepSeek：分析相似论文方法间的演进逻辑
@@ -154,17 +162,18 @@ ztx-research-claw/
 
 ## 代码概览
 
-全管线共 **4422 行** Python 代码，分布在 10 个文件中：
+全管线共 **4562 行** Python 代码，分布在 11 个文件中：
 
 ```plain
 文件                            行数    职责
 ──────────────────────────────────────────────────────
 models.py                       277    10 个 dataclass：Agent 间的数据契约
 main.py                         392    7 阶段流水线编排 + checkpoint + --resume
-agents/__init__.py               22    统一导出 7 个 Agent 类
+agents/__init__.py               23    统一导出 8 个模块
 agents/outline_parser.py        249    纯解析，无 LLM 调用
-agents/literature_searcher.py   612    异步三源检索 + 去重 + 加权评分
-agents/pdf_downloader.py        303    异步下载 + OA 链接级联 + BibTeX 提取
+agents/seed_paper_parser.py     140    解析用户手写引用论文.md → Paper 列表
+agents/literature_searcher.py   812    异步三源检索 + 种子注入 + citation expansion
+agents/pdf_downloader.py        340    异步下载 + OA 链接级联 + arXiv 标题搜索兜底
 agents/paper_reader.py          963    LLM 阅读（3 种模式：摘要/全文/跨文献对比）
 agents/methodology_analyst.py   402    LLM 方法分类 + 演进图谱生成
 agents/writer.py                678    LLM 逐章写作 + [cite:X] 占位 + 终稿润色
@@ -179,9 +188,14 @@ agents/citation_formatter.py    524    全局引用编号 + BibTeX 生成 + LLM 
 Phase 1  outline_parser.run()
               → list[Chapter]
                                 \
-Phase 2  literature_searcher.run(chapters)  [async]
-              → list[Paper]                    \
-                                                \
+Phase 2  literature_searcher.run(chapters, seed_file)  [async]
+              ├── 解析种子论文 (引用论文.md → 22 篇 Paper)
+              ├── S2 enrichment (补全种子元数据)
+              ├── Citation expansion (种子的 references + citations)
+              ├── 三源关键词检索 (S2 + OpenAlex + arXiv)
+              ├── 去重 + arXiv PDF 链接修正
+              └── 相关性过滤 + 评分 → list[Paper]  \
+                                                    \
 Phase 3  pdf_downloader.run(papers, pdf_dir)  [async]
               → list[Paper]  (含 local_path + preliminary_bib)
                     |
@@ -223,17 +237,29 @@ Phase 4  paper_reader.run(papers, mode)
 - 自动映射 chapter_num → chapter_id（1→introduction, ..., 7→conclusion）
 - 为每个 chapter 关联 prompt_file 和 target_citations
 
-### literature_searcher（异步，三源检索）
+### seed_paper_parser（纯解析，无 LLM）
+- 解析用户手写的 `引用论文.md`，提取已填充的种子论文（跳过【待补充】条目）
+- 从 URL 中提取 arXiv ID / DOI / IEEE document ID
+- 从「详细」字段猜测年份和会议/期刊名
+- 输出 Paper 对象列表，source 标记为 "seed"
+- 种子论文是用户精心筛选的"奠基性"论文，质量高于自动检索结果
+
+### literature_searcher（异步，三源检索 + 种子注入 + 引用扩展）
+- **种子注入**：解析引用论文.md → 种子 Paper → S2 API 补全元数据（abstract, citations, authors）
+- **Citation expansion**：从种子出发，获取每篇种子的 references + citations，沿时间轴发现相关工作
 - Semantic Scholar：GET /paper/search，fieldsOfStudy 过滤
 - OpenAlex：GET /works，concept filter，从 inverted index 重建 abstract
 - arXiv：Atom XML 解析，xml.etree.ElementTree
 - 去重：difflib.SequenceMatcher，阈值 0.85
+- **PDF 链接修正**：去重后强制将有 arxiv_id 的论文 pdf_url 覆盖为 arXiv 直链
 - 加权评分：0.3×引用数 + 0.2×时效性 + 0.5×摘要相关度
 - 年份加权：>3 年引用阈值=5，≤3 年降为 2
 - 全部用 httpx.AsyncClient + asyncio.Semaphore 控流
+- S2 API 调用带 tenacity 重试（3 次）+ 429 限流处理
 
 ### pdf_downloader（异步，级联下载）
-- 优先级：S2 OA 链接 → arXiv 直链 → Unpaywall API
+- 优先级：S2 OA 链接 → arXiv 直链 → Unpaywall API → arXiv 标题搜索兜底
+- **arXiv 标题搜索**：当所有源都拿不到 PDF 时，用标题精确搜索 arXiv API
 - 下载时验证 %PDF 文件头 + 最小体积
 - 同步从 Paper 字段生成 preliminary_bib 供 citation_formatter 使用
 
