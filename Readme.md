@@ -22,7 +22,7 @@
 │  │    └── LLM 推荐论文: 根据每章提示词推荐应引用的论文标题               │   │
 │  │    └── 精确搜索: 用论文标题 → Semantic Scholar / arXiv               │   │
 │  │    └── 去重 + PDF 链接修正 (优先 arXiv 直链)                         │   │
-│  │    └── 相关性过滤 + 引用评分 → Top 500                               │   │
+│  │    └── 硬件过滤 + 综述过滤 + 相关性评分 → Top 500                    │   │
 │  │    └── ▶ Checkpoint: outputs/checkpoints/literature_searcher.json    │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                              │                                              │
@@ -33,6 +33,7 @@
 │  │    └── 优先级: S2 OA链接 → arXiv直链 → Unpaywall → arXiv标题搜索     │   │
 │  │    └── 下载 PDF 至 outputs/papers/                                   │   │
 │  │    └── 同步提取引用元数据 → preliminary_bib (供 citation_formatter)   │   │
+│  │    └── 下载失败 → 生成 failed_downloads.md + 暂停等待人工下载         │   │
 │  │    └── ▶ Checkpoint: outputs/checkpoints/pdf_downloader.json         │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                              │                                              │
@@ -138,7 +139,9 @@ ztx-research-claw/
 │   ├── checkpoints/              # 7 个 agent 对应 7 个断点
 │   ├── papers/                   # 下载的 PDF
 │   ├── drafts/                   # 各章节草稿 + 终稿
-│   └── references.bib            # citation_formatter 统一维护
+│   ├── references.bib            # citation_formatter 统一维护
+│   ├── failed_downloads.md       # 需要人工下载的论文清单
+│   └── failed_references.bib     # 未下载论文的 BibTeX
 └── data/
     ├── outline.md                # 综述框架
     └── paper_example.md          # 种子论文（用户手写）
@@ -147,19 +150,19 @@ ztx-research-claw/
 
 ## 代码概览
 
-全管线共 **4500+ 行** Python 代码，分布在 11 个文件中：
+全管线共 **4700+ 行** Python 代码，分布在 11 个文件中：
 
 ```plain
 文件                            行数    职责
 ──────────────────────────────────────────────────────
 models.py                       277    10 个 dataclass：Agent 间的数据契约
-main.py                         392    7 阶段流水线编排 + checkpoint + --resume
+main.py                         400    7 阶段流水线编排 + checkpoint + --resume + 下载失败暂停
 agents/__init__.py               23    统一导出 8 个模块
 agents/outline_parser.py        249    纯解析，无 LLM 调用
 agents/seed_paper_parser.py     140    解析用户手写种子论文 → Paper 列表
-agents/literature_searcher.py  1000+   LLM 推荐 + 三源检索 + 种子注入 + citation expansion
-agents/pdf_downloader.py        340    异步下载 + OA 链接级联 + arXiv 标题搜索兜底
-agents/paper_reader.py          963    LLM 阅读（3 种模式：摘要/全文/跨文献对比）
+agents/literature_searcher.py   730    LLM 推荐 + 三源检索 + 种子注入 + citation expansion + 硬件过滤
+agents/pdf_downloader.py        420    异步下载 + OA 链接级联 + arXiv 标题搜索兜底 + 失败报告
+agents/paper_reader.py         1060    LLM 阅读（3 种模式 + 精读分级）
 agents/methodology_analyst.py   402    LLM 方法分类 + 演进图谱生成
 agents/writer.py                678    LLM 逐章写作 + [cite:X] 占位 + 终稿润色
 agents/citation_formatter.py    524    全局引用编号 + BibTeX 生成 + LLM 校验
@@ -177,9 +180,10 @@ Phase 2  literature_searcher.run(chapters, seed_file)  [async]
               ├── 解析种子论文 (data/paper_example.md → Paper 列表)
               ├── S2 enrichment (补全种子元数据)
               ├── Citation expansion (种子的 references + citations)
-              ├── LLM 推荐论文 (根据每章提示词推荐论文标题)
+              ├── LLM 推荐论文 (根据每章提示词推荐论文标题，排除硬件类)
               ├── 精确搜索 (论文标题 → Semantic Scholar / arXiv)
               ├── 去重 + arXiv PDF 链接修正
+              ├── 硬件过滤 (排除传感器/执行器等硬件论文)
               └── 相关性过滤 + 评分 → list[Paper]  \
                                                     \
 Phase 3  pdf_downloader.run(papers, pdf_dir)  [async]
@@ -230,9 +234,10 @@ Phase 4  paper_reader.run(papers, mode)
 - 输出 Paper 对象列表，source 标记为 "seed"
 - 种子论文是用户精心筛选的"奠基性"论文，质量高于自动检索结果
 
-### literature_searcher（异步，LLM 推荐 + 三源检索 + 种子注入 + 引用扩展）
+### literature_searcher（异步，LLM 推荐 + 三源检索 + 种子注入 + 引用扩展 + 硬件过滤）
 - **LLM 推荐论文**：读取每章提示词文件，调用 MiMo V2.5 Pro 推荐该章应引用的论文标题
-- **精确搜索**：用论文标题去 Semantic Scholar / arXiv 精确搜索，命中率高
+- **硬件过滤**：根据 config 中的 `hardware_filter` 配置，排除传感器设计、执行器制造等硬件类论文
+- **综述过滤**：根据每章 prompt 中的引用要求，限制综述类论文数量
 - **种子注入**：解析 paper_example.md → 种子 Paper → S2 API 补全元数据（abstract, citations, authors）
 - **Citation expansion**：从种子出发，获取每篇种子的 references + citations，沿时间轴发现相关工作
 - Semantic Scholar：GET /paper/search，fieldsOfStudy 过滤
@@ -251,9 +256,15 @@ Phase 4  paper_reader.run(papers, mode)
 - 下载时验证 %PDF 文件头 + 最小体积
 - 同步从 Paper 字段生成 preliminary_bib 供 citation_formatter 使用
 - httpx.AsyncClient(trust_env=True) 支持系统代理
+- **下载失败处理**：生成 `outputs/failed_downloads.md`（论文信息 + 下载链接）和 `outputs/failed_references.bib`（BibTeX），暂停管线等待人工下载
 
 ### paper_reader（LLM，MiMo V2.5 Pro）
 - 三种阅读模式：abstract_only / fulltext_deep / cross_paper_compare
+- **精读/粗读分级**（tiered 模式，可配置）：
+  - 综述类：年份 > 2023 且被引 >= 200 → 精读，否则摘要
+  - 非综述类：种子论文 → 精读 | 有开源代码 → 精读
+  - 老论文(<=2023) 被引 >= 50 → 精读 | 近两年(2024-2025) 被引 >= 25 → 精读
+  - 2025年及以后 → 精读 | 其余 → 摘要
 - 全文模式：pdfplumber 提取文本 → 8000 字分块 → 逐块 LLM 提取 → 合并
 - 输出结构化 JSON → 解析为 ReadingNotes
 - OpenAI 客户端使用 httpx.Client(trust_env=True) 支持系统代理
@@ -324,6 +335,15 @@ export HTTPS_PROXY=http://127.0.0.1:7897
 python main.py
 ```
 
+## PDF 下载失败处理
+
+某些学术网站（IEEE、Springer 等）会触发人机验证，脚本无法自动下载。Phase 3 完成后：
+- 如果有未下载的论文，管线会自动暂停
+- 生成 `outputs/failed_downloads.md`：包含每篇论文的标题、下载链接、BibTeX
+- 生成 `outputs/failed_references.bib`：供 citation_formatter 使用
+- 用户手动下载 PDF 后放入 `outputs/papers/` 目录
+- 运行 `python main.py --resume` 继续后续流程
+
 # ⚠️ 注意事项
 
 ## API 与网络
@@ -365,7 +385,9 @@ outputs/
 │   ├── challenges_and_trends.md
 │   ├── conclusion.md
 │   └── final_polished.md        # 全文合并终稿
-└── references.bib               # 统一 BibTeX 引用库
+├── references.bib               # 统一 BibTeX 引用库
+├── failed_downloads.md          # 需要人工下载的论文清单（含下载链接）
+└── failed_references.bib        # 未下载论文的 BibTeX（供引用）
 ```
 
 # 💡 优化建议
@@ -375,6 +397,8 @@ outputs/
 - 在 `data/paper_example.md` 中添加高质量种子论文，citation expansion 会自动发现相关工作
 - `prompts/` 目录下的提示词越具体，LLM 推荐的论文越精准
 - 如果检索结果噪声多，调高 `min_citation_count` 或降低 `max_total_papers`
+- 硬件过滤可在 `config.yaml` 的 `agents.literature_searcher.hardware_filter` 中配置
+- 综述类关键词可在 `config.yaml` 的 `agents.literature_searcher.survey_keywords` 中配置
 
 ## 提升写作质量
 
@@ -388,6 +412,7 @@ outputs/
 - methodology_analyst 的输入如果超过 60K 字符会自动截断，确保 ReadingNotes 足够精炼
 - writer 的 polish 阶段用 max reasoning_effort，如果额度紧张可以改回 high
 - literature_searcher 的 LLM 推荐功能会消耗 MiMo tokens，每章约 2K tokens
+- 精读分级规则可在 `config.yaml` 的 `agents.paper_reader.tiered_reading` 中调整
 
 ## 自定义扩展
 

@@ -23,11 +23,12 @@ from agents.seed_paper_parser import parse_seed_papers
 
 logger = logging.getLogger(__name__)
 
-# 综述类论文标题关键词
+# 综述类论文标题关键词（默认值，可被 config 覆盖）
 SURVEY_KEYWORDS = [
     "survey", "review", "overview", "progress in", "summary",
     "introduction to", "synthesis", "state of the art", "taxonomy",
     "comprehensive", "systematic review", "meta-analysis",
+    "a tutorial", "perspective", "frontier",
 ]
 
 # 代码仓库关键词
@@ -37,10 +38,11 @@ CODE_KEYWORDS = [
 ]
 
 
-def _is_survey(title: str) -> bool:
+def _is_survey(title: str, keywords: list[str] | None = None) -> bool:
     """判断论文标题是否为综述类。"""
+    kws = keywords or SURVEY_KEYWORDS
     t = title.lower()
-    return any(kw in t for kw in SURVEY_KEYWORDS)
+    return any(kw in t for kw in kws)
 
 
 def _has_code_link(text: str) -> str | None:
@@ -105,6 +107,15 @@ class LiteratureSearcher:
         self.dedup_threshold = self.agent_cfg.get("dedup_threshold", 0.85)
         self.max_total_papers = self.agent_cfg.get("max_total_papers", 200)
         self.timeout = self.network_cfg.get("timeout", 30)
+
+        # Survey keywords from config or defaults
+        self.survey_keywords = self.agent_cfg.get("survey_keywords", SURVEY_KEYWORDS)
+
+        # Hardware filter config
+        hw_cfg = self.agent_cfg.get("hardware_filter", {})
+        self.hw_filter_enabled = hw_cfg.get("enabled", False)
+        self.hw_exclude = [kw.lower() for kw in hw_cfg.get("exclude_keywords", [])]
+        self.hw_override = [kw.lower() for kw in hw_cfg.get("override_keywords", [])]
 
         # Scoring weights
         scoring = self.agent_cfg.get("relevance_scoring", {})
@@ -232,7 +243,10 @@ class LiteratureSearcher:
         system_msg = (
             "你是学术论文推荐专家。根据综述章节的写作要求，推荐应引用的真实论文。\n"
             "要求：1) 论文必须真实存在 2) 优先高引用经典论文 3) 包含近3年新进展\n"
-            "4) 每行一篇论文英文标题 5) 不要编造论文" + survey_hint
+            "4) 每行一篇论文英文标题 5) 不要编造论文\n"
+            "6) 本综述侧重于算法（强化学习、策略学习、控制、规划等），不要推荐硬件设计类论文\n"
+            "   （如传感器设计、执行器制造、柔性机器人硬件、电子皮肤、3D打印等）"
+            + survey_hint
         )
 
         user_msg = (
@@ -260,7 +274,7 @@ class LiteratureSearcher:
                     titles.append(line)
 
                     # 额外检查：如果章节不允许综述，过滤掉 LLM 推荐的综述
-                    if not allow_survey and _is_survey(line):
+                    if not allow_survey and _is_survey(line, self.survey_keywords):
                         titles.pop()
                         logger.debug("Filtered survey from LLM: %s", line[:50])
 
@@ -654,21 +668,14 @@ class LiteratureSearcher:
         return filtered
 
     def _filter_surveys_and_score(self, papers: list[Paper], chapters: list[Chapter]) -> list[Paper]:
-        """按章节类型过滤综述 + 评分排序。
+        """按章节类型过滤综述 + 硬件过滤 + 评分排序。"""
+        # 硬件过滤
+        if self.hw_filter_enabled:
+            papers = self._filter_hardware(papers)
 
-        - 综述类章节（introduction, challenges_and_trends, conclusion）：保留综述
-        - 非综述类章节：移除综述
-        最终合并去重后按分数排序取 top N。
-        """
         # 分类
-        surveys = [p for p in papers if _is_survey(p.title)]
-        non_surveys = [p for p in papers if not _is_survey(p.title)]
-
-        # 综述类章节可以用综述 + 非综述
-        # 非综述类章节只能用非综述
-        # 最终结果 = 非综述（所有章节共用）+ 综述（仅综述章节用）
-        # 但因为我们输出的是一个扁平列表，后续 writer 按 chapter_tags 分配
-        # 所以这里保留两种，让 paper_reader 和 writer 自己按 tags 过滤
+        surveys = [p for p in papers if _is_survey(p.title, self.survey_keywords)]
+        non_surveys = [p for p in papers if not _is_survey(p.title, self.survey_keywords)]
 
         # 评分
         keywords = self.config.get("project", {}).get("keywords", [])
@@ -679,6 +686,25 @@ class LiteratureSearcher:
         logger.info("Scored & ranked: %d surveys, %d non-surveys, kept %d",
                      len(surveys), len(non_surveys), len(result))
         return result
+
+    def _filter_hardware(self, papers: list[Paper]) -> list[Paper]:
+        """排除硬件类论文：标题/摘要匹配 exclude_keywords 且不匹配 override_keywords。"""
+        filtered = []
+        removed = 0
+        for p in papers:
+            text = f"{p.title} {p.abstract}".lower()
+            # 如果包含 override 关键词（算法相关），保留
+            if any(kw in text for kw in self.hw_override):
+                filtered.append(p)
+                continue
+            # 如果包含 exclude 关键词（硬件相关），排除
+            if any(kw in text for kw in self.hw_exclude):
+                removed += 1
+                logger.debug("Hardware filter removed: %s", p.title[:60])
+                continue
+            filtered.append(p)
+        logger.info("Hardware filter: %d -> %d (removed %d)", len(papers), len(filtered), removed)
+        return filtered
 
     def _score(self, paper: Paper, keywords: list[str]) -> float:
         """加权评分：引用数 + 时效性 + 关键词匹配。"""

@@ -72,3 +72,5 @@ outputs/checkpoints/
 
 # 项目特定：生成的参考文献
 outputs/references.bib
+outputs/failed_downloads.md
+outputs/failed_references.bib

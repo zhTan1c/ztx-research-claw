@@ -92,6 +92,14 @@ class PDFDownloader:
         checkpoint.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._save_checkpoint(checkpoint)
 
+        # Generate failed download report
+        failed_papers = [p for p in papers if not p.local_path or not Path(p.local_path).is_file()]
+        if failed_papers:
+            self._generate_failed_report(failed_papers, pdf_dir)
+            logger.warning("Failed to download %d papers. See outputs/failed_downloads.md", len(failed_papers))
+        else:
+            logger.info("All papers downloaded successfully!")
+
         return papers
 
     # ------------------------------------------------------------------
@@ -327,6 +335,76 @@ class PDFDownloader:
         # Truncate
         clean = clean[:50].rstrip("_")
         return clean or "untitled"
+
+    # ------------------------------------------------------------------
+    # Failed download report
+    # ------------------------------------------------------------------
+
+    def _generate_failed_report(self, failed_papers: list[Paper], pdf_dir: str) -> None:
+        """生成人工下载指南：outputs/failed_downloads.md"""
+        report_dir = Path(self.config.get("project", {}).get("output_dir", "./outputs"))
+        report_path = report_dir / "failed_downloads.md"
+        bib_path = report_dir / "failed_references.bib"
+
+        lines = [
+            "# 📥 需要人工下载的论文\n",
+            f"共 {len(failed_papers)} 篇论文无法自动下载，请手动下载 PDF 后放入 `{pdf_dir}/` 目录。\n",
+            "下载后运行 `python main.py --resume` 继续后续流程。\n",
+            "---\n",
+        ]
+
+        bib_entries = []
+
+        for i, paper in enumerate(failed_papers, 1):
+            # 构建可能的下载链接
+            urls = []
+            if paper.arxiv_id:
+                urls.append(f"- arXiv: https://arxiv.org/pdf/{paper.arxiv_id}.pdf")
+            if paper.doi:
+                urls.append(f"- DOI: https://doi.org/{paper.doi}")
+            if paper.pdf_url:
+                urls.append(f"- OA链接: {paper.pdf_url}")
+
+            # 生成 BibTeX
+            if not paper.preliminary_bib:
+                paper.preliminary_bib = self._extract_citation(paper)
+            bib_entries.append(paper.preliminary_bib)
+
+            # 生成建议文件名
+            safe_name = self._sanitize_filename(paper.title)
+            save_name = f"{safe_name}_{paper.paper_id}.pdf"
+
+            lines.append(f"## {i}. {paper.title}\n")
+            lines.append(f"- **论文ID**: `{paper.paper_id}`")
+            lines.append(f"- **年份**: {paper.year or '未知'}")
+            lines.append(f"- **引用数**: {paper.citation_count}")
+            if paper.arxiv_id:
+                lines.append(f"- **arXiv ID**: `{paper.arxiv_id}`")
+            if paper.doi:
+                lines.append(f"- **DOI**: `{paper.doi}`")
+            lines.append(f"- **下载后文件名**: `{save_name}`")
+            lines.append(f"- **放置路径**: `{pdf_dir}/{save_name}`")
+            lines.append("")
+            if urls:
+                lines.append("**下载链接**:")
+                lines.extend(urls)
+                lines.append("")
+            lines.append("---\n")
+
+        # 写入报告
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Failed download report: %s (%d papers)", report_path, len(failed_papers))
+
+        # 写入 BibTeX（供 citation_formatter 使用，即使 PDF 未下载也能引用）
+        bib_path.write_text("\n\n".join(bib_entries) + "\n", encoding="utf-8")
+        logger.info("Failed references BibTeX: %s (%d entries)", bib_path, len(bib_entries))
+
+        print(f"\n⚠️  {len(failed_papers)} 篇论文无法自动下载！")
+        print(f"   详见: {report_path}")
+        print(f"   BibTeX: {bib_path}")
+        print(f"   下载 PDF 后放入: {pdf_dir}/")
+        print(f"   然后运行: python main.py --resume\n")
 
     # ------------------------------------------------------------------
     # Checkpoint helpers

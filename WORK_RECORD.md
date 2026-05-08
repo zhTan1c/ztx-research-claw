@@ -121,3 +121,53 @@
 
 ---
 
+## 2026-05-09 — 硬件过滤 + 精读配置化 + 下载失败处理
+
+### config.yaml 新增约束
+
+**文献检索约束（literature_searcher）：**
+- `hardware_filter`：硬件过滤配置
+  - `exclude_keywords`：22 个硬件类关键词（传感器设计、执行器制造、电子皮肤等）
+  - `override_keywords`：7 个算法类关键词（grasp、manipulation、RL 等），避免误杀
+- `survey_keywords`：综述类论文识别关键词（15 个），可配置覆盖
+
+**精读分级配置（paper_reader）：**
+- `tiered_reading`：精读/粗读分级规则
+  - `survey`：综述类精读条件（citations >= 200 且 year > 2023）
+  - `non_survey`：非综述类精读条件（种子论文、有代码、高被引、新论文等）
+
+### literature_searcher.py 改动
+
+- `_is_survey()` 支持自定义关键词列表参数
+- `_generate_queries()` LLM prompt 新增硬件排除提示
+- `_filter_surveys_and_score()` 使用 config 中的 survey_keywords
+- 新增 `_filter_hardware()` 方法：按 exclude/override 关键词过滤硬件论文
+
+### pdf_downloader.py 改动
+
+**新增 `_generate_failed_report()` 方法：**
+- 生成 `outputs/failed_downloads.md`：每篇失败论文的标题、ID、年份、引用数、下载链接、建议文件名
+- 生成 `outputs/failed_references.bib`：失败论文的 BibTeX（供 citation_formatter 引用）
+- 控制台显式提示用户手动下载
+
+### main.py 改动
+
+- Phase 3 完成后检查是否有未下载的论文
+- 如果有，打印提示信息并 `sys.exit(0)`，暂停管线
+- 用户手动下载后运行 `python main.py --resume` 继续
+
+### 工作流程
+
+```
+Phase 2 完成 → Phase 3 下载 PDF
+  ↓
+检查：是否有未下载的论文？
+  ├── 全部下载成功 → 继续 Phase 4
+  └── 有失败论文 → 生成 failed_downloads.md + failed_references.bib
+                    → 打印提示 → sys.exit(0)
+                    → 用户手动下载 PDF 放入 outputs/papers/
+                    → python main.py --resume → 继续 Phase 4
+```
+
+---
+

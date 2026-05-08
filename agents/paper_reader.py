@@ -147,6 +147,21 @@ class PaperReader:
         self.reading_modes: dict = agent_cfg.get("reading_modes", {})
         self.agent_model: str = agent_cfg.get("model", "mimo_v25_pro")
 
+        # Tiered reading config
+        tiered_cfg: dict = agent_cfg.get("tiered_reading", {})
+        self.tiered_enabled: bool = tiered_cfg.get("enabled", True)
+        survey_cfg = tiered_cfg.get("survey", {})
+        non_survey_cfg = tiered_cfg.get("non_survey", {})
+        self.survey_cite_th = survey_cfg.get("fulltext_citation_threshold", 200)
+        self.survey_year_min = survey_cfg.get("fulltext_year_min", 2023)
+        self.ns_seed = non_survey_cfg.get("seed_paper", True)
+        self.ns_has_code = non_survey_cfg.get("has_code", True)
+        self.ns_classic_cite_th = non_survey_cfg.get("classic_citation_threshold", 50)
+        self.ns_classic_year_max = non_survey_cfg.get("classic_year_max", 2023)
+        self.ns_recent_cite_th = non_survey_cfg.get("recent_citation_threshold", 25)
+        self.ns_recent_range = non_survey_cfg.get("recent_year_range", [2024, 2025])
+        self.ns_new_year_min = non_survey_cfg.get("new_paper_year_min", 2025)
+
         # Checkpoint directory
         ckpt_cfg: dict = config.get("checkpoint", {})
         self.ckpt_dir = Path(ckpt_cfg.get("dir", "./outputs/checkpoints"))
@@ -257,33 +272,28 @@ class PaperReader:
                 is_survey = _is_survey_title(paper.title)
 
                 if is_survey:
-                    # 综述类：23年以后且被引>200才精读
-                    if year > 2023 and citations > 200:
+                    # 综述类：满足年份和引用阈值才精读
+                    if year > self.survey_year_min and citations > self.survey_cite_th:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
                     else:
                         paper_mode = "abstract_only"
                         abstract_count += 1
                 else:
-                    # 非综述类
-                    if is_seed:
-                        # 种子论文必须精读
+                    # 非综述类：按配置规则判断
+                    if self.ns_seed and is_seed:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
-                    elif paper.has_code:
-                        # 有开源项目 → 精读
+                    elif self.ns_has_code and paper.has_code:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
-                    elif year <= 2023 and citations > 50:
-                        # 老论文高被引 → 精读
+                    elif year <= self.ns_classic_year_max and citations > self.ns_classic_cite_th:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
-                    elif 2024 <= year <= 2025 and citations > 25:
-                        # 近两年论文中被引 → 精读
+                    elif self.ns_recent_range[0] <= year <= self.ns_recent_range[1] and citations > self.ns_recent_cite_th:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
-                    elif year >= 2025:
-                        # 最新论文 → 精读
+                    elif year >= self.ns_new_year_min:
                         paper_mode = "fulltext_deep"
                         fulltext_count += 1
                     else:

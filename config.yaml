@@ -182,6 +182,62 @@ agents:
       recency_weight: 0.2
       abstract_match_weight: 0.5
 
+    # ── 硬件过滤：排除与算法无关的硬件类论文 ──
+    hardware_filter:
+      enabled: true
+      # 标题或摘要包含这些关键词的论文会被降权或排除
+      exclude_keywords:
+        - "sensor design"
+        - "wearable sensor"
+        - "flexible sensor"
+        - "tactile sensor design"
+        - "soft actuator"
+        - "pneumatic actuator"
+        - "electroactive polymer"
+        - "shape memory alloy"
+        - "piezoelectric"
+        - "fabrication method"
+        - "manufacturing process"
+        - "3d printing"
+        - "soft robot design"
+        - "gripper design"
+        - "compliant mechanism design"
+        - "haptic device"
+        - "exoskeleton"
+        - "prosthetic hand"
+        - "electronic skin"
+        - "e-skin"
+        - "pressure sensor"
+        - "strain sensor"
+        - "force sensor array"
+      # 但标题同时包含这些词的不算硬件（避免误杀算法论文）
+      override_keywords:
+        - "grasp"
+        - "manipulation"
+        - "reinforcement learning"
+        - "policy"
+        - "control"
+        - "planning"
+        - "sim-to-real"
+
+    # ── 综述类论文关键词（用于识别 survey/review 类文章）──
+    survey_keywords:
+      - "survey"
+      - "review"
+      - "overview"
+      - "progress in"
+      - "summary"
+      - "introduction to"
+      - "synthesis"
+      - "state of the art"
+      - "taxonomy"
+      - "comprehensive"
+      - "systematic review"
+      - "meta-analysis"
+      - "a tutorial"
+      - "perspective"
+      - "frontier"
+
   pdf_downloader:
     model: "mimo_v25_pro"
     sources_priority:
@@ -207,8 +263,24 @@ agents:
       cross_paper_compare:
         max_tokens: 200000
         model_override: null
-      tiered:
-        fulltext_citation_threshold: 300    # 被引 >= 50 精读全文，否则只读摘要
+
+    # ── 精读/粗读分级规则 ──
+    tiered_reading:
+      enabled: true
+      default_mode: "tiered"  # "tiered" | "fulltext_deep" | "abstract_only"
+      # 综述类论文精读条件
+      survey:
+        fulltext_citation_threshold: 200  # 被引 >= 200 精读全文
+        fulltext_year_min: 2023           # 且发表年份 > 2023
+      # 非综述类论文精读条件
+      non_survey:
+        seed_paper: true                  # 种子论文 → 精读
+        has_code: true                    # 有开源代码 → 精读
+        classic_citation_threshold: 50    # 老论文(<=2023) 被引>=50 → 精读
+        classic_year_max: 2023
+        recent_citation_threshold: 25     # 近两年(2024-2025) 被引>=25 → 精读
+        recent_year_range: [2024, 2025]
+        new_paper_year_min: 2025          # 2025年及以后 → 精读
 
   # --- DeepSeek 系（3 个）---
 

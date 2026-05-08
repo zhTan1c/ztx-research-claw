@@ -309,6 +309,18 @@ async def main():
         save_checkpoint(checkpoint, checkpoint_path)
         logger.info("Phase 3 完成，checkpoint 已保存。")
 
+    # --- 检查是否有未下载的论文 ---
+    failed_papers = [p for p in papers if not p.local_path or not Path(p.local_path).is_file()]
+    if failed_papers:
+        print(f"\n{'='*60}")
+        print(f"  ⚠️  {len(failed_papers)} 篇论文无法自动下载")
+        print(f"  请查看: outputs/failed_downloads.md")
+        print(f"  手动下载 PDF 后放入: {pdf_dir_str}/")
+        print(f"  然后运行: python main.py --resume")
+        print(f"{'='*60}\n")
+        logger.warning("Pipeline paused: %d papers need manual download", len(failed_papers))
+        sys.exit(0)
+
     # --- Phase 4: Read papers ---
     print_phase(4, 7, "论文阅读")
     if args.resume and checkpoint_has_phase(checkpoint, "paper_reader"):
