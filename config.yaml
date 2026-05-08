@@ -189,8 +189,8 @@ agents:
       - "arxiv_pdf"
       - "unpaywall"
       - "arxiv_search"                       # arXiv 标题搜索兜底
-    download_timeout: 60
-    max_concurrent: 5
+    download_timeout: 30
+    max_concurrent: 2
     # 下载时同步记录引用元数据，输出给 citation_formatter
     extract_citation_on_download: true
     citation_output_field: "preliminary_bib"
@@ -207,6 +207,8 @@ agents:
       cross_paper_compare:
         max_tokens: 200000
         model_override: null
+      tiered:
+        fulltext_citation_threshold: 300    # 被引 >= 50 精读全文，否则只读摘要
 
   # --- DeepSeek 系（3 个）---
 

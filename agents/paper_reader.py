@@ -21,6 +21,16 @@ from models import AgentCheckpoint, Paper, ReadingNotes
 
 logger = logging.getLogger(__name__)
 
+# 综述类论文标题关键词
+_SURVEY_KW = ["survey", "review", "overview", "progress in", "summary",
+              "introduction to", "synthesis", "state of the art", "taxonomy",
+              "comprehensive", "systematic review", "meta-analysis"]
+
+
+def _is_survey_title(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in _SURVEY_KW)
+
 
 # ============================================================
 # System prompt template for structured paper reading
@@ -158,22 +168,28 @@ class PaperReader:
     # ------------------------------------------------------------------
 
     def run(
-        self, papers: list[Paper], mode: str = "fulltext_deep"
+        self, papers: list[Paper], mode: str = "tiered"
     ) -> list[ReadingNotes]:
         """Read papers and return structured ReadingNotes.
 
         Args:
             papers: list of Paper objects to read.
-            mode: one of 'abstract_only', 'fulltext_deep', 'cross_paper_compare'.
+            mode: one of 'abstract_only', 'fulltext_deep', 'cross_paper_compare', 'tiered'.
+                  'tiered' automatically chooses fulltext for high-impact papers
+                  and abstract-only for the rest, based on citation_count thresholds.
 
         Returns:
             list of ReadingNotes, one per paper (or per batch for cross compare).
         """
-        if mode not in self.reading_modes and mode != "cross_paper_compare":
+        # Tiered reading config
+        tiered_cfg = self.reading_modes.get("tiered", {})
+        fulltext_threshold = tiered_cfg.get("fulltext_citation_threshold", 50)
+
+        if mode not in self.reading_modes and mode not in ("cross_paper_compare", "tiered"):
             logger.warning(
-                "Unknown reading mode '%s', falling back to 'abstract_only'", mode
+                "Unknown reading mode '%s', falling back to 'tiered'", mode
             )
-            mode = "abstract_only"
+            mode = "tiered"
 
         mode_cfg: dict = self.reading_modes.get(mode, {})
         max_tokens: int = mode_cfg.get("max_tokens", self.default_max_tokens)
@@ -220,6 +236,9 @@ class PaperReader:
 
         # Single-paper modes: iterate
         total = len(papers)
+        fulltext_count = 0
+        abstract_count = 0
+
         for idx, paper in enumerate(papers):
             if paper.paper_id in already_read:
                 logger.debug(
@@ -230,17 +249,65 @@ class PaperReader:
                 )
                 continue
 
+            # Tiered mode: decide per-paper based on type, citations, year, has_code
+            if mode == "tiered":
+                citations = paper.citation_count or 0
+                year = paper.year or 9999
+                is_seed = paper.source in ("seed", "seed_enriched")
+                is_survey = _is_survey_title(paper.title)
+
+                if is_survey:
+                    # 综述类：23年以后且被引>200才精读
+                    if year > 2023 and citations > 200:
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    else:
+                        paper_mode = "abstract_only"
+                        abstract_count += 1
+                else:
+                    # 非综述类
+                    if is_seed:
+                        # 种子论文必须精读
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    elif paper.has_code:
+                        # 有开源项目 → 精读
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    elif year <= 2023 and citations > 50:
+                        # 老论文高被引 → 精读
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    elif 2024 <= year <= 2025 and citations > 25:
+                        # 近两年论文中被引 → 精读
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    elif year >= 2025:
+                        # 最新论文 → 精读
+                        paper_mode = "fulltext_deep"
+                        fulltext_count += 1
+                    else:
+                        paper_mode = "abstract_only"
+                        abstract_count += 1
+
+                paper_max_tokens = self.reading_modes.get(paper_mode, {}).get("max_tokens", 4000)
+            else:
+                paper_mode = mode
+                paper_max_tokens = max_tokens
+
             logger.info(
-                "[%d/%d] Reading paper: %s — %s",
-                idx + 1,
-                total,
-                paper.paper_id,
-                paper.title[:80],
+                "[%d/%d] %s — %s [%s, %s, %d cites%s]",
+                idx + 1, total,
+                paper.paper_id, paper.title[:60],
+                paper_mode,
+                f"survey" if _is_survey_title(paper.title) else "paper",
+                paper.citation_count or 0,
+                ", code" if paper.has_code else "",
             )
 
             try:
-                system_prompt = self._build_system_prompt(mode, max_tokens)
-                notes = self._read_single_paper(paper, mode, system_prompt)
+                system_prompt = self._build_system_prompt(paper_mode, paper_max_tokens)
+                notes = self._read_single_paper(paper, paper_mode, system_prompt)
                 all_notes.append(notes)
                 already_read.add(paper.paper_id)
                 logger.info("  -> chapter_tags: %s", notes.chapter_tags)
@@ -263,7 +330,8 @@ class PaperReader:
 
         self._save_checkpoint(already_read, all_notes, status="completed")
         logger.info(
-            "PaperReader.run complete — %d notes total", len(all_notes)
+            "PaperReader.run complete — %d notes total (fulltext=%d, abstract=%d)",
+            len(all_notes), fulltext_count, abstract_count,
         )
         return all_notes
 
@@ -821,6 +889,13 @@ class PaperReader:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _to_str(val) -> str:
+        """Coerce LLM output to str — LLM sometimes returns list instead of str."""
+        if isinstance(val, list):
+            return "\n".join(str(item) for item in val if item)
+        return str(val) if val else ""
+
+    @staticmethod
     def _merge_chunk_notes(
         chunk_notes: list[ReadingNotes], paper: Paper
     ) -> ReadingNotes:
@@ -842,26 +917,28 @@ class PaperReader:
 
         for note in chunk_notes:
             for c in note.key_contributions:
-                c_lower = c.lower().strip()
+                c_str = PaperReader._to_str(c)
+                c_lower = c_str.lower().strip()
                 if c_lower and c_lower not in seen_contributions:
                     seen_contributions.add(c_lower)
-                    all_contributions.append(c)
+                    all_contributions.append(c_str)
 
             for t in note.chapter_tags:
-                if t not in seen_tags:
-                    seen_tags.add(t)
-                    all_tags.append(t)
+                t_str = PaperReader._to_str(t)
+                if t_str not in seen_tags:
+                    seen_tags.add(t_str)
+                    all_tags.append(t_str)
 
             if note.methodology_summary:
-                methodology_parts.append(note.methodology_summary)
+                methodology_parts.append(PaperReader._to_str(note.methodology_summary))
             if note.experimental_results:
-                results_parts.append(note.experimental_results)
+                results_parts.append(PaperReader._to_str(note.experimental_results))
             if note.limitations:
-                limitations_parts.append(note.limitations)
+                limitations_parts.append(PaperReader._to_str(note.limitations))
             if note.relevance_to_survey:
-                relevance_parts.append(note.relevance_to_survey)
+                relevance_parts.append(PaperReader._to_str(note.relevance_to_survey))
             if note.raw_notes:
-                raw_parts.append(note.raw_notes)
+                raw_parts.append(PaperReader._to_str(note.raw_notes))
 
         return ReadingNotes(
             paper_id=paper.paper_id,

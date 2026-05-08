@@ -34,6 +34,9 @@ class Paper:
     local_path: Optional[str] = None # 下载后的本地路径
     # 来源
     source: str = ""                 # "semantic_scholar" / "openalex" / "arxiv"
+    # 开源项目
+    has_code: bool = False           # 是否有开源代码仓库
+    code_url: Optional[str] = None   # 代码仓库链接
     # 阅读笔记 (paper_reader 填充)
     reading_notes: Optional[str] = None
     # 初步引用元数据 (pdf_downloader 填充)

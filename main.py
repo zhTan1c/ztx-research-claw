@@ -318,7 +318,7 @@ async def main():
     else:
         logger.info("Phase 4: 论文阅读...")
         reader = PaperReader(config)
-        reading_notes = reader.run(papers, mode="fulltext_deep")
+        reading_notes = reader.run(papers, mode="tiered")
         checkpoint["paper_reader"] = reading_notes
         save_checkpoint(checkpoint, checkpoint_path)
         logger.info("Phase 4 完成，checkpoint 已保存。")

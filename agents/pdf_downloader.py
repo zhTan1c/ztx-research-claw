@@ -65,6 +65,7 @@ class PDFDownloader:
             headers=self.network_cfg.get("headers", {}),
             verify=self.network_cfg.get("verify_ssl", True),
             trust_env=True,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         ) as client:
             tasks = []
             for paper in papers:
