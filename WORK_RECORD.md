@@ -171,3 +171,81 @@ Phase 2 完成 → Phase 3 下载 PDF
 
 ---
 
+## 2026-05-09（续）— 检索质量优化
+
+### 问题：检索到的论文与主题不相关
+
+首轮运行后发现检索到的论文大多是大模型、NLP、综述类，与"柔性物质灵巧抓取"无关。
+
+### 根因分析
+
+LLM 推荐的论文经过 5 层过滤后大幅缩减：
+```
+22728 → Pre-filter(3000) → Dedup(1137) → Relevance(116) → Year(70) → Citation(70) → Hardware(68) → Final(68)
+```
+Relevance 过滤（正向关键词匹配）砍掉 90%，且正向词太宽泛（"reinforcement learning"匹配了游戏AI、NLP等不相关论文）。
+
+### 修复
+
+#### 1. Relevance 过滤：正向 + 反向联合（literature_searcher.py）
+
+**正向词（~60 个，精准聚焦机器人操控）：**
+- 核心抓取：grasp, gripper, in-hand, bimanual, pick-and-place...
+- 柔性物体：deformable object, cloth, fabric, rope, folding, knot...
+- 灵巧手：dexterous hand, allegro, shadow hand...
+- 触觉：tactile grasping, gelsight, visuotactile...
+- 仿真平台：isaac gym, softgym, robosuite...
+
+**反向词（~60 个，排除非机器人领域）：**
+- NLP/大模型：language model, llm, gpt, bert, nlp, machine translation...
+- CV（非机器人）：image classification, autonomous driving, face recognition...
+- 推荐/数据：recommendation system, stock prediction, anomaly detection...
+- 医学：cancer, clinical, patient, drug, diagnosis...
+
+**过滤逻辑：** 有反向词 → 排除；无正向词 → 排除；两者都通过 → 保留。
+
+#### 2. LLM 查询生成优化（literature_searcher.py）
+
+- 从 prompt 文件解析引用要求（`_parse_citation_requirement`）
+- 支持格式：`引用要求：35～45篇，最多引用3篇综述类论文`
+- 综述章节（introduction, challenges_and_trends, conclusion）允许推荐综述
+- 非综述章节明确要求 LLM 不推荐综述
+
+#### 3. 代码检测（models.py + literature_searcher.py）
+
+- Paper 数据类新增 `has_code` 和 `code_url` 字段
+- 搜索结果解析时检测摘要中的 GitHub/GitLab/HF 链接
+- 用于 paper_reader 的精读/粗读决策
+
+#### 4. 全局上限约束（literature_searcher.py）
+
+- 按章节 prompt 中的 `target_citations` 计算总需求
+- cap = min(总需求, max_total_papers)
+- 评分排序后按 cap 截断
+- 日志打印每章需求和总量
+
+#### 5. polish reasoning_effort 降级（config.yaml）
+
+- `polish: "max"` → `polish: "high"`
+- 与写作阶段一致，减少 token 消耗
+
+#### 6. Paper Reader 精读/粗读规则更新（paper_reader.py）
+
+综述类论文：
+- 年份 > 2023 且 被引 > 200 → 精读全文
+- 其余 → 只读摘要
+
+非综述类论文：
+- 种子论文 → 精读全文
+- 有开源项目 → 精读全文
+- 年份 ≤ 2023 且 被引 > 50 → 精读全文
+- 年份 2024-2025 且 被引 > 25 → 精读全文
+- 年份 ≥ 2025 → 精读全文
+- 其余 → 只读摘要
+
+### 依赖安装
+
+无新增依赖。
+
+---
+

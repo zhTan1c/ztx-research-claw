@@ -182,6 +182,9 @@ agents:
       recency_weight: 0.2
       abstract_match_weight: 0.5
 
+    # ── 年份约束 ──
+    min_year: 2016                     # 不推荐此年份之前的论文
+
     # ── 硬件过滤：排除与算法无关的硬件类论文 ──
     hardware_filter:
       enabled: true
@@ -325,15 +328,15 @@ agents:
       - "conclusion"
       - "polish"
     reasoning_effort_map:
-      outline_alignment: "high"
-      introduction: "high"
+      outline_alignment: "middle"
+      introduction: "middle"
       non_rl_method: "high"
       deep_rl_method: "high"
       mixed_and_SOTA_method: "high"
-      experiment_and_performance: "high"
-      challenges_and_trends: "high"
-      conclusion: "high"
-      polish: "max"
+      experiment_and_performance: "middle"
+      challenges_and_trends: "middle"
+      conclusion: "middle"
+      polish: "high"
     output_formats:
       default: "markdown"
       tables: "json"

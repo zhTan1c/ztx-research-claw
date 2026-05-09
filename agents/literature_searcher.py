@@ -214,6 +214,7 @@ class LiteratureSearcher:
         papers = self._deduplicate(papers)
         papers = self._enrich_pdf_links(papers)
         papers = self._filter_relevance(papers)
+        papers = self._filter_year(papers)
         papers = self._filter_citations(papers)
 
         # 6. 按章节分组过滤综述 + 评分排序
@@ -235,24 +236,41 @@ class LiteratureSearcher:
         if prompt_file and Path(prompt_file).exists():
             prompt_content = Path(prompt_file).read_text(encoding="utf-8")
 
+        # 从 config 读取过滤条件
+        min_year = self.agent_cfg.get("min_year", 2016)
+        hw_cfg = self.agent_cfg.get("hardware_filter", {})
+        exclude_kw = hw_cfg.get("exclude_keywords", [])
+
+        # 综述约束
         if allow_survey:
-            survey_hint = f"\n\n本章最多引用 {max_surveys} 篇综述类论文，其余必须是具体方法/实验论文。"
+            survey_hint = f"本章最多引用 {max_surveys} 篇综述类论文（标题含 survey/review/overview 的），其余必须是具体方法/实验论文。"
         else:
-            survey_hint = "\n\n【重要】本章只引用实验创新类论文，不要推荐任何综述类论文（标题含 survey/review/overview 的不要推荐）。"
+            survey_hint = "本章只引用实验创新类论文，不要推荐任何综述类论文（标题含 survey/review/overview/summary 的不要推荐）。"
+
+        # 硬件排除
+        hw_hint = ""
+        if exclude_kw:
+            hw_hint = f"\n不要推荐硬件设计类论文，标题含以下关键词的不要推荐：{', '.join(exclude_kw[:10])}等。"
+
+        # 多推荐一些，因为后续过滤会去掉部分
+        recommend_count = int(chapter.target_citations * 1.8)
 
         system_msg = (
-            "你是学术论文推荐专家。根据综述章节的写作要求，推荐应引用的真实论文。\n"
-            "要求：1) 论文必须真实存在 2) 优先高引用经典论文 3) 包含近3年新进展\n"
-            "4) 每行一篇论文英文标题 5) 不要编造论文\n"
-            "6) 本综述侧重于算法（强化学习、策略学习、控制、规划等），不要推荐硬件设计类论文\n"
-            "   （如传感器设计、执行器制造、柔性机器人硬件、电子皮肤、3D打印等）"
-            + survey_hint
+            "你是学术论文推荐专家。根据综述章节的写作要求，推荐应引用的真实论文。\n\n"
+            "【严格要求】\n"
+            f"1) 论文必须是 {min_year} 年以后发表的\n"
+            "2) 论文必须真实存在，不要编造\n"
+            "3) 优先推荐高引用经典论文和近3年新进展\n"
+            "4) 每行一篇论文英文标题，不要编号\n"
+            f"5) {survey_hint}\n"
+            f"6) 本综述侧重算法（强化学习、策略学习、控制、规划等）{hw_hint}\n\n"
+            f"你需要推荐 {recommend_count} 篇论文（因为部分论文后续会被过滤掉）。"
         )
 
         user_msg = (
             f"综述第 {chapter.chapter_num} 章《{chapter.title}》的写作要求：\n\n"
             f"{prompt_content}\n\n"
-            f"请推荐 {chapter.target_citations} 篇论文标题，每行一篇。"
+            f"请推荐 {recommend_count} 篇论文标题，每行一篇。"
         )
 
         try:
@@ -636,15 +654,96 @@ class LiteratureSearcher:
         return papers
 
     def _filter_relevance(self, papers: list[Paper]) -> list[Paper]:
-        """关键词相关性过滤。"""
-        terms = [
-            "grasp", "grasping", "manipulation", "dexterous", "deformable",
-            "soft object", "cloth", "tactile", "compliant", "robotic hand",
-            "gripper", "prehension", "pick and place", "contact-rich",
-            "sim-to-real", "reinforcement learning", "policy learning", "diffusion policy",
+        """正向 + 反向联合过滤。
+
+        正向：标题或摘要必须包含至少一个机器人操控相关词
+        反向：标题或摘要不能包含明显的非机器人领域词
+        """
+        # ── 正向：必须和机器人操控/抓取/柔性物体相关 ──
+        positive = [
+            # 核心抓取
+            "grasp", "grasping", "prehension", "gripper", "end-effector",
+            "in-hand", "bimanual", "dual-arm", "pick and place", "pick-and-place",
+            "fingertip", "finger gaiting", "whole-hand",
+            # 柔性物体
+            "deformable object", "soft object", "cloth", "fabric", "rope",
+            "cable", "wire", "bag", "towel", "soft body", "compliant object",
+            "soft tissue", "flexible object", "pliant",
+            "fold", "folding", "unfold", "crumple", "flatten", "drape",
+            "cloth manipulation", "cloth grasping", "fabric manipulation",
+            "garment", "laundry", "knot", "tying", "sewing", "stitching",
+            "thread", "string manipulation",
+            "deformable linear", "deformable planar", "deformable manipulation",
+            "shape servoing", "deformation estimation",
+            # 机器人操控（非抓取）
+            "robotic manipulation", "robot grasping", "manipulation planning",
+            "tool manipulation", "peg-in-hole", "insertion task",
+            "handover", "tossing", "flipping", "pouring",
+            # 灵巧手
+            "dexterous hand", "dexterous manipulation", "dexterous grasp",
+            "allegro", "shadow hand", "leap hand", "robotic hand",
+            "multi-finger", "multi finger",
+            # 触觉
+            "tactile grasping", "tactile manipulation", "tactile sensing",
+            "visuotactile", "visuo-tactile", "gelsight",
+            "contact-rich manipulation", "contact force",
+            # Sim-to-Real 机器人
+            "sim-to-real manipulation", "sim-to-real grasping",
+            "domain randomization robotic",
+            # 机器人仿真平台
+            "isaac gym", "isaaclab", "softgym", "robosuite", "rlbench",
         ]
-        filtered = [p for p in papers if any(t in f"{p.title} {p.abstract}".lower() for t in terms)]
-        logger.info("Relevance: %d -> %d", len(papers), len(filtered))
+
+        # ── 反向：明确不属于机器人操控领域 ──
+        negative = [
+            # 大语言模型 / NLP
+            "language model", "llm", "large language", "gpt", "chatgpt",
+            "bert", "transformer for text", "text generation",
+            "natural language", "nlp", "machine translation",
+            "question answering", "text classification", "sentiment",
+            "summarization", "named entity", "information extraction",
+            "dialogue", "dialog system", "conversational",
+            # 计算机视觉（非机器人）
+            "image classification", "object detection yolo",
+            "image segmentation", "image generation", "stable diffusion",
+            "generative adversarial", "gan ", "style transfer",
+            "face recognition", "pose estimation human",
+            "autonomous driving", "self-driving", "vehicle detection",
+            "traffic", "pedestrian",
+            # 推荐系统 / 数据挖掘
+            "recommendation system", "collaborative filtering",
+            "click-through", "user behavior", "anomaly detection",
+            "time series forecasting", "stock prediction",
+            # 医学 / 生物
+            "cancer", "tumor", "clinical", "patient", "medical imaging",
+            "drug", "protein", "genome", "biological", "cell biology",
+            "diagnosis", "pathology", "radiology",
+            # 其他非机器人领域
+            "climate", "weather", "ecology", "agriculture",
+            "chemical synthesis", "organic chemistry",
+            "network security", "intrusion detection",
+            "speech recognition", "audio processing",
+            "music generation", "game playing atari",
+        ]
+
+        filtered = []
+        for p in papers:
+            text = f"{p.title} {p.abstract}".lower()
+            # 反向排除
+            if any(t in text for t in negative):
+                continue
+            # 正向要求
+            if any(t in text for t in positive):
+                filtered.append(p)
+
+        logger.info("Relevance (pos+neg filter): %d -> %d", len(papers), len(filtered))
+        return filtered
+
+    def _filter_year(self, papers: list[Paper]) -> list[Paper]:
+        """年份过滤：移除 min_year 之前的论文。"""
+        min_year = self.agent_cfg.get("min_year", 2016)
+        filtered = [p for p in papers if (p.year is None or p.year >= min_year)]
+        logger.info("Year filter (>= %d): %d -> %d", min_year, len(papers), len(filtered))
         return filtered
 
     def _filter_citations(self, papers: list[Paper]) -> list[Paper]:
@@ -668,7 +767,7 @@ class LiteratureSearcher:
         return filtered
 
     def _filter_surveys_and_score(self, papers: list[Paper], chapters: list[Chapter]) -> list[Paper]:
-        """按章节类型过滤综述 + 硬件过滤 + 评分排序。"""
+        """硬件过滤 + 评分排序 + 按章节需求总量截断。"""
         # 硬件过滤
         if self.hw_filter_enabled:
             papers = self._filter_hardware(papers)
@@ -677,14 +776,23 @@ class LiteratureSearcher:
         surveys = [p for p in papers if _is_survey(p.title, self.survey_keywords)]
         non_surveys = [p for p in papers if not _is_survey(p.title, self.survey_keywords)]
 
+        # 计算每章需求总量
+        chapter_total = sum(ch.target_citations for ch in chapters)
+        cap = min(chapter_total, self.max_total_papers)
+
+        # 按章节打印需求
+        for ch in chapters:
+            logger.info("  Chapter %s: target=%d papers", ch.chapter_id, ch.target_citations)
+        logger.info("  Total needed: %d, cap: %d", chapter_total, cap)
+
         # 评分
         keywords = self.config.get("project", {}).get("keywords", [])
         scored = [(self._score(p, keywords), p) for p in papers]
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        result = [p for _, p in scored[:self.max_total_papers]]
-        logger.info("Scored & ranked: %d surveys, %d non-surveys, kept %d",
-                     len(surveys), len(non_surveys), len(result))
+        result = [p for _, p in scored[:cap]]
+        logger.info("Scored & ranked: %d surveys, %d non-surveys, kept %d (cap=%d)",
+                     len(surveys), len(non_surveys), len(result), cap)
         return result
 
     def _filter_hardware(self, papers: list[Paper]) -> list[Paper]:
